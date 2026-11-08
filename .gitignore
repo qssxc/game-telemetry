@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+
+# 데이터 / DB
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# Metabase 실행 파일·내부 DB
+metabase/
+
+# 비밀 정보
+.env
