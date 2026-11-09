@@ -6,6 +6,7 @@ __pycache__/
 *.sqlite-shm
 *.sqlite-wal
 *.db
+*.ndjson
 
 # Metabase 실행 파일·내부 DB
 metabase/
