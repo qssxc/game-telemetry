@@ -34,25 +34,8 @@ from typing import Any
 
 import yaml
 
-from db import connect
+from db import connect,SCHEMA
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS metric_results (
-    metric_name      TEXT    NOT NULL,
-    scope            TEXT    NOT NULL,   -- 'session' | 'party' | 'global'
-    session_id       TEXT,               -- scope='global' 이면 NULL
-    -- scope='party' 면 NULL. 파티 값은 특정 플레이어의 것이 아니다.
-    -- scope='global' 이면 session_id 와 함께 NULL.
-    player_id        TEXT,
-    dimension_key    TEXT    NOT NULL,   -- 쪼갠 축의 이름. 없으면 ''
-    dimension_value  TEXT    NOT NULL,   -- 그 축의 값. 없으면 ''
-    value            REAL,
-    computed_at      TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS ix_metrics_lookup
-    ON metric_results (scope, session_id, player_id, metric_name);
-"""
 
 AGGREGATES = {
     "count": "COUNT(*)",

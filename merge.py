@@ -29,7 +29,7 @@ import sys
 from collections import defaultdict
 from typing import Any
 
-from db import connect
+from db import connect,SCHEMA
 
 # ---------------------------------------------------------------- 판정 규칙
 #
@@ -60,21 +60,6 @@ BROADCAST_KEYS: dict[str, tuple[str, ...]] = {
 
 # 사유를 뒤늦게 알려주는 이벤트. 어댑터가 이중 계상을 막으면서 남긴다.
 REASON_CORRECTION_EVENT = "resource_reason_corrected"
-
-SCHEMA = """
--- 병합 단계가 계산해 낸 값. 원본(event_params)은 건드리지 않고 여기에 덧댄다.
--- 조회 시 COALESCE 로 이 값을 먼저 보면 된다.
-CREATE TABLE IF NOT EXISTS merge_overrides (
-    session_id  TEXT NOT NULL,
-    player_id   TEXT NOT NULL,
-    seq         INTEGER NOT NULL,
-    key         TEXT NOT NULL,
-    text_value  TEXT,
-    num_value   REAL,
-    source      TEXT,          -- 어떤 규칙이 이 값을 넣었는지
-    PRIMARY KEY (session_id, player_id, seq, key)
-);
-"""
 
 
 def ensure_columns(con: sqlite3.Connection) -> None:
