@@ -34,13 +34,7 @@ from typing import Any
 
 import yaml
 
-
-def connect(db_path: str) -> sqlite3.Connection:
-    """DB 를 연다. loader.py 와 같은 내용을 일부러 복제했다 —
-    두 스크립트가 서로를 임포트하지 않아야 어느 폴더에서든 단독 실행된다."""
-    con = sqlite3.connect(db_path)
-    con.execute("PRAGMA journal_mode = WAL")
-    return con
+from db import connect
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS metric_results (

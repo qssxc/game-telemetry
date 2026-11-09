@@ -1,10 +1,23 @@
 """
-Metabase 선택적 절([[...]]) 이 붙은 카드 쿼리를, 필터 있음/없음 두 상태로 검증한다.
+HybridRPG 전용 카드. **이 파일은 게임을 안다.**
 
-Metabase 는 변수가 비어 있으면 [[ ]] 블록을 통째로 지우고,
-값이 들어오면 괄호만 벗긴 뒤 {{var}} 를 값으로 바꾼다. 그걸 그대로 흉내낸다.
+여기 적힌 SQL 은 v_battles, v_purchases, v_party_ledger 처럼 이 게임을 위해
+손으로 쓴 뷰와 monster_name 같은 이 게임의 파라미터를 쓴다. 다른 게임에
+그대로 가져다 쓸 수 없고, 그게 맞다 — "전투 HP 추이" 는 전투가 있는
+게임에서만 뜻이 있다.
+
+범용 카드 생성기는 cardgen.py 다. 그쪽은 지표 정의 YAML 과 중립 지표 뷰만
+읽으므로 어느 게임에나 붙는다. **새 게임을 붙일 때 필요한 것은 그 게임의
+YAML 하나이고, 이 파일은 없어도 된다.**
+
+단독 실행하면 카드를 Metabase 에 올리지 않고 로컬 SQLite 로 돌려본다.
+Metabase 의 선택적 절([[...]])을 흉내내어 필터 있음/없음 상태를 모두 본다.
+
+    python cards.py playtest.sqlite
 """
-import re, sqlite3, sys
+import sqlite3, sys
+
+from cardgen import render
 
 CARDS = {}
 
@@ -85,7 +98,9 @@ ORDER BY 2 DESC
 # 말이 깨지는 자리였다. 지금은 있는 지표를 전부 보여주고, 많으면 metric 필터로
 # 좁힌다 — 이 카드는 YAML 이 바뀌어도 다시 밀어넣을 필요가 없다.
 CARDS['6. 세션별 지표'] = """
-SELECT SUBSTR(session_id, 1, INSTR(session_id, '_') - 1)
+SELECT CASE WHEN INSTR(session_id, '_') > 1
+            THEN SUBSTR(session_id, 1, INSTR(session_id, '_') - 1)
+            ELSE session_id END
          || ' · ' || player_id  AS "세션 · 플레이어",
        metric_name              AS "지표",
        ROUND(value, 2)          AS "값"
@@ -125,7 +140,9 @@ ORDER BY e.seq
 """
 
 CARDS['8. 파티 지출 기여도'] = """
-SELECT SUBSTR(l.session_id, 1, INSTR(l.session_id, '_') - 1)
+SELECT CASE WHEN INSTR(l.session_id, '_') > 1
+            THEN SUBSTR(l.session_id, 1, INSTR(l.session_id, '_') - 1)
+            ELSE l.session_id END
          || ' · ' || l.recorded_by          AS "세션 · 플레이어",
        -SUM(l.delta)                        AS "지출",
        ROUND(-SUM(l.delta) * 100.0 /
@@ -156,94 +173,6 @@ DISPLAY = {
     '5. 부위별 장착':    'bar',
     '7. 전투 HP 추이':   'line',
 }
-
-
-NAME_RE = re.compile(r'^\w+$')
-
-
-def from_metrics(yaml_path: str) -> dict:
-    """지표 정의(YAML)에서 카드를 만든다.
-
-    이것이 이 작업의 요지다. 위의 CARDS 는 손으로 쓴 것이라, 지표를 하나
-    추가해도 카드가 생기지 않는다. 여기서 정의 파일을 읽어 지표마다 카드를
-    만들면, "정의를 고치고 다시 밀어넣으면 보인다" 가 성립한다.
-
-    돌려주는 모양: {카드이름: (sql, 차트종류)}
-
-    by 가 있는 지표는 축으로 쪼갠 카드를, 없는 지표는 세션·플레이어별
-    카드를 만든다. 수식(formula)도 결과는 똑같이 metric_results 에 들어가므로
-    구분하지 않는다.
-    """
-    import yaml
-    with open(yaml_path, encoding='utf-8') as f:
-        spec = yaml.safe_load(f) or {}
-
-    out = {}
-    for m in spec.get('metrics') or []:
-        name = m.get('name')
-        if not name:
-            continue
-        # 이름을 SQL 에 문자열로 박으므로 모양을 확인한다. 따옴표가 섞인
-        # 이름이 들어오면 쿼리가 깨지거나, 더 나쁘게는 엉뚱한 쿼리가 된다.
-        if not NAME_RE.match(str(name)):
-            print(f'  [건너뜀] 지표 이름에 쓸 수 없는 문자: {name!r}')
-            continue
-
-        scope = m.get('scope', 'session')
-
-        if scope == 'party' and not m.get('by'):
-            # 파티 지표는 세션당 한 행이다. 참가자 수를 같이 보여준다 —
-            # 1인 세션과 4인 세션의 파티 합계를 나란히 놓으면 오해하기 쉽다.
-            out[f'파티 · {name}'] = ("""
-SELECT SUBSTR(session_id, 1, INSTR(session_id, '_') - 1) AS "세션",
-       party_size                                        AS "인원",
-       ROUND(value, 2)                                   AS "%s"
-FROM v_metrics_party
-WHERE metric_name = '%s'
-  [[AND session_id = {{session_id}}]]
-ORDER BY 1
-""" % (name, name), 'bar')
-            continue
-
-        if m.get('by'):
-            out[f'지표 · {name} ({m["by"]})'] = ("""
-SELECT dimension_value        AS "%s",
-       ROUND(SUM(value), 2)   AS "%s"
-FROM v_metrics_dimension
-WHERE metric_name = '%s'
-  [[AND session_id = {{session_id}}]]
-GROUP BY 1
-ORDER BY 2 DESC
-""" % (m['by'], name, name), 'bar')
-        else:
-            out[f'지표 · {name}'] = ("""
-SELECT SUBSTR(session_id, 1, INSTR(session_id, '_') - 1)
-         || ' · ' || player_id  AS "세션 · 플레이어",
-       ROUND(value, 2)          AS "%s"
-FROM v_metrics_session
-WHERE metric_name = '%s'
-  [[AND session_id = {{session_id}}]]
-ORDER BY 1
-""" % (name, name), 'bar')
-    return out
-
-
-def render(sql: str, params: dict) -> str:
-    """Metabase 의 선택적 절 치환을 흉내낸다."""
-    def block(m):
-        body = m.group(1)
-        names = re.findall(r'\{\{\s*(\w+)\s*\}\}', body)
-        if any(params.get(n) in (None, '') for n in names):
-            return ''                      # 변수가 비면 블록 전체 삭제
-        return body
-    out = re.sub(r'\[\[(.*?)\]\]', block, sql, flags=re.S)
-
-    def var(m):
-        v = params.get(m.group(1))
-        if v is None:
-            raise KeyError(f'필수 변수 {m.group(1)} 에 값이 없다')
-        return "'" + str(v).replace("'", "''") + "'"
-    return re.sub(r'\{\{\s*(\w+)\s*\}\}', var, out)
 
 
 def main() -> int:

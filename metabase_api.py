@@ -66,6 +66,7 @@ import urllib.request
 import uuid
 from typing import Any
 
+from db import connect
 
 class MetabaseError(Exception):
     """Metabase 와 이야기하다 실패했다. 메시지는 사람이 읽고 고칠 수 있게 쓴다."""
@@ -370,7 +371,8 @@ def main() -> int:
     ap.add_argument("--db-file", default=None,
                     help="이 SQLite 파일이 등록돼 있는지 확인한다")
     ap.add_argument("--push", action="store_true",
-                    help="cards.py 의 카드를 Metabase 에 생성/갱신한다")
+                    help="카드를 Metabase 에 생성/갱신한다 "
+                         "(cards.py 의 게임 전용 카드 + --from-yaml 로 생성한 카드)")
     ap.add_argument("--collection", default="플레이테스트 지표",
                     help="카드를 담을 컬렉션 이름")
     ap.add_argument("--dry-run", action="store_true",
@@ -438,17 +440,34 @@ def main() -> int:
         return 1
 
     try:
-        import cards
+        import cardgen
     except ImportError as e:
-        print(f"\n[실패] cards.py 를 불러오지 못했다: {e}", file=sys.stderr)
+        print(f"\n[실패] cardgen.py 를 불러오지 못했다: {e}", file=sys.stderr)
         return 1
 
-    # 손으로 쓴 카드 + (선택) 지표 정의에서 생성한 카드
-    todo = {n: (s, cards.DISPLAY.get(n, "table")) for n, s in cards.CARDS.items()}
+    todo: dict[str, tuple[str, str]] = {}
+    sample_params: dict[str, Any] = {}
+
+    # 게임 전용 카드는 선택이다. 새 게임은 지표 정의 YAML 만으로 시작할 수
+    # 있어야 하고, 그 게임을 위한 손수 쓴 카드는 나중 일이다.
+    try:
+        import cards
+        todo.update({n: (s, cards.DISPLAY.get(n, "table"))
+                     for n, s in cards.CARDS.items()})
+        sample_params = dict(getattr(cards, "SAMPLE_PARAMS", {}))
+        print(f"\ncards.py — 게임 전용 카드 {len(todo)}개")
+    except ImportError:
+        print("\ncards.py 없음 — 지표 정의에서 생성한 카드만 올린다")
+
     if args.from_yaml:
-        gen = cards.from_metrics(args.from_yaml)
-        print(f"\n{os.path.basename(args.from_yaml)} 에서 카드 {len(gen)}개 생성")
+        gen = cardgen.from_metrics(args.from_yaml)
+        print(f"{os.path.basename(args.from_yaml)} 에서 카드 {len(gen)}개 생성")
         todo.update(gen)
+
+    if not todo:
+        print("\n[실패] 올릴 카드가 없다. --from-yaml 로 지표 정의를 주거나 "
+              "cards.py 를 두어라.", file=sys.stderr)
+        return 1
 
     # 보내기 전에 로컬 SQLite 로 쿼리를 돌려본다.
     # 깨진 SQL 을 Metabase 에 올려두면 대시보드에서 빨간 카드로 발견하게 되는데,
@@ -456,8 +475,7 @@ def main() -> int:
     checked, broken = {}, 0
     local = args.db_file if os.path.exists(args.db_file) else None
     if local:
-        import sqlite3
-        con = sqlite3.connect(f"file:{local}?mode=ro", uri=True)
+        con = connect(local, fast=False, readonly=True)
         print(f"\n로컬 검사 — {local}")
     else:
         print(f"\n로컬 검사 건너뜀 — {args.db_file} 가 여기 없다")
@@ -469,7 +487,7 @@ def main() -> int:
         try:
             # 필수 변수에는 표본값을 넣어 돌려본다. 선택 변수는 비워 둔다
             # — Metabase 가 값 없이 열었을 때와 같은 상태다.
-            con.execute(cards.render(sql, dict(cards.SAMPLE_PARAMS))).fetchone()
+            con.execute(cardgen.render(sql, sample_params)).fetchone()
             checked[name] = (sql, display)
         except Exception as e:
             broken += 1

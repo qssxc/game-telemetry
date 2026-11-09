@@ -29,6 +29,8 @@ import sys
 from collections import defaultdict
 from typing import Any
 
+from db import connect
+
 # ---------------------------------------------------------------- 판정 규칙
 #
 # 게임마다 다른 지식이다. 원래는 게임 정의 파일에 있어야 하고, 지금은 여기 둔다.
@@ -295,7 +297,7 @@ def main() -> int:
     ap.add_argument("--show", action="store_true", help="판정 결과를 자원별로 보여준다")
     args = ap.parse_args()
 
-    con = sqlite3.connect(args.db)
+    con = connect(args.db)
     con.execute("PRAGMA journal_mode = WAL")
     rc = merge(con)
 

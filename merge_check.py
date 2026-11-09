@@ -25,6 +25,8 @@ import sys
 from collections import defaultdict
 from typing import Any
 
+from db import connect
+
 # 클라이언트가 로컬에서 계산하는 값들. 같은 사건이라도 파일마다 다르므로
 # 중복 판정 키에서 빼야 한다.
 LOCAL_ONLY_PARAMS = {
@@ -309,7 +311,7 @@ def main() -> int:
     ap.add_argument("--db", default="playtest.sqlite")
     args = ap.parse_args()
 
-    con = sqlite3.connect(args.db)
+    con = connect(args.db)
 
     grouped: dict[str, list[str]] = defaultdict(list)
     for sid, pid in con.execute(

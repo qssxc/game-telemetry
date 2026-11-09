@@ -34,6 +34,8 @@ import sqlite3
 import sys
 from typing import Any, Iterator
 
+from db import connect
+
 # 이벤트 봉투(envelope)에 해당하는 키. 이 외의 키는 모두 파라미터로 본다.
 ENVELOPE_KEYS = {
     "session_id", "player_id", "seq", "t_ms", "t_raw_ms",
@@ -181,19 +183,6 @@ def begin_load(con: sqlite3.Connection, reset: bool) -> None:
         sql += [f'DROP TABLE IF EXISTS "{t}";' for t in OUR_TABLES]
     sql.append(SCHEMA)
     con.executescript("\n".join(sql))      # COMMIT 없음 — 트랜잭션이 열려 있다
-
-
-def connect(db_path: str, fast: bool = False) -> sqlite3.Connection:
-    """DB 를 연다. fast=True 면 적재용으로 내구성을 조금 낮춘다."""
-    con = sqlite3.connect(db_path)
-    con.execute("PRAGMA journal_mode = WAL")
-    con.execute("PRAGMA foreign_keys = ON")
-    if fast:
-        # 적재는 언제든 처음부터 다시 돌릴 수 있다. 중간에 전원이 꺼져도
-        # 원본 NDJSON 이 남아 있으므로 내구성을 거래해도 잃는 것이 없다.
-        con.execute("PRAGMA synchronous = OFF")
-        con.execute("PRAGMA cache_size = -64000")   # 64MB
-    return con
 
 
 def read_lines(path: pathlib.Path) -> Iterator[tuple[int, dict[str, Any] | None]]:
