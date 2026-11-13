@@ -66,7 +66,6 @@ import urllib.request
 import uuid
 from typing import Any
 
-from db import connect
 
 class MetabaseError(Exception):
     """Metabase 와 이야기하다 실패했다. 메시지는 사람이 읽고 고칠 수 있게 쓴다."""
@@ -362,7 +361,9 @@ def client_from_env(url: str | None = None) -> Metabase:
     )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """argv 를 받는 이유 — pipeline.py 가 한 프로세스 안에서 부른다.
+    None 이면 평소처럼 명령줄을 읽는다."""
     ap = argparse.ArgumentParser(
         description="Metabase 연결을 확인하고 데이터베이스 목록을 보여준다"
     )
@@ -380,7 +381,7 @@ def main() -> int:
     ap.add_argument("--from-yaml", default=None,
                     help="지표 정의 YAML 에서 지표마다 카드를 만든다 "
                          "(예: hybridrpg.yaml)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     url = args.url or os.environ.get("METABASE_URL", "http://localhost:3000")
 
@@ -475,7 +476,8 @@ def main() -> int:
     checked, broken = {}, 0
     local = args.db_file if os.path.exists(args.db_file) else None
     if local:
-        con = connect(local, fast=False, readonly=True)
+        import sqlite3
+        con = sqlite3.connect(f"file:{local}?mode=ro", uri=True)
         print(f"\n로컬 검사 — {local}")
     else:
         print(f"\n로컬 검사 건너뜀 — {args.db_file} 가 여기 없다")

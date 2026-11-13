@@ -11,6 +11,82 @@
       ↓  metabase_api.py    카드 생성/갱신 → Metabase
 ```
 
+## 어디까지가 게임과 무관한가
+
+새 게임에 붙일 때 **손대지 않는 파일**과 **그 게임을 위해 쓰는 파일**이 갈린다.
+
+| 중립 — 그대로 쓴다 | 게임 전용 — 새로 쓴다 |
+|---|---|
+| `loader.py` `metrics.py` `viewgen.py` | 지표 정의 YAML (`hybridrpg.yaml`) |
+| `cardgen.py` `metabase_api.py` | **`merge.py` 의 이벤트 설정** (아래) |
+| `views.sql` 의 기본 뷰·지표 뷰 층 | `views.sql` 의 게임 전용 뷰 층 |
+| | `cards.py` (손으로 쓴 카드, **선택**) |
+
+> `merge.py` 는 **중립이 아니다.** 파일 윗부분의 `SHARED_STATE_KEYS` 와
+> `BROADCAST_KEYS` 에 이 게임의 이벤트 이름 9개가 들어 있다. 어떤 이벤트가
+> 협동 세션에서 참가자마다 복제되는지는 게임마다 다르므로, 새 게임은 이
+> 두 딕셔너리를 자기 이벤트로 바꿔야 한다. 비워 두면 중복 판정을 하지 않을
+> 뿐 나머지는 정상 동작한다.
+
+**새 게임을 붙이는 데 필요한 최소한은 지표 정의 YAML 하나다.** 중립 파일만
+가져다 놓고 YAML 을 쓰면 적재부터 Metabase 카드까지 간다. `cards.py` 는 그
+게임에서만 뜻이 있는 카드("전투 HP 추이" 같은)를 나중에 손으로 더할 때 쓴다.
+
+레이싱 게임 로그(세션 id `gp-tokyo-01`, 이벤트 `lap_completed`)로 확인했다.
+중립 파일만으로 `v_lap_completed` `v_pit_stop` `v_crash` 뷰와 카드 5장까지
+코드 수정 없이 갔다.
+
+### 이벤트별 뷰는 만들어진다 (`viewgen.py`)
+
+이벤트 하나당 뷰 하나를 **DB 를 읽어서** 써낸다. `merge.py` 뒤에 돌린다.
+
+### 중복 복제는 뷰가 막는다
+
+협동 세션에서 공유 자원과 브로드캐스트 이벤트는 참가자 파일마다 복제된다.
+거르지 않고 합치면 **참가자 수만큼 부풀려진다.** 실측으로 골드 -9,650 vs
+실제 -7,900, 몬스터 처치 2건 vs 1건이었다. 오류는 나지 않고 숫자만 틀리며,
+**1인 세션에서는 멀쩡하다.** 조회하는 사람이 매번 기억할 종류의 규칙이 아니다.
+
+그래서 `canonical = 0` 인 행이 실제로 있는 이벤트는 걸러진 뷰를 기본으로
+만들고, 거르지 않은 전부는 `_all` 뷰로 따로 낸다.
+
+```
+v_monster_killed       1건   ← canonical = 1 만. 기본으로 이걸 쓴다
+v_monster_killed_all   2건   ← 원본. 병합이 제대로 됐는지 볼 때
+```
+
+중복이 없는 이벤트에는 필터도 `_all` 도 붙지 않는다. 1인 게임이면 아무것도
+달라지지 않는다.
+
+**이 판단에 이벤트 이름이 쓰이지 않는다.** 어떤 이벤트가 복제되는지는
+`merge.py` 설정이 알고 있고, `viewgen.py` 는 그 결과(`canonical` 칼럼)만 본다.
+그래서 설정이 없는 게임에서도 맞게 동작한다 — 중복 판정이 안 되면
+`canonical = 0` 이 없고, 필터도 안 붙는다.
+
+칼럼 이름은 그 이벤트가 실제로 가진 파라미터에서, 타입은 실제로 들어 있는
+값에서 알아낸다. 소수부가 있는 행이 하나라도 있으면 REAL, 없으면 INTEGER 로
+자른다 — `damage`(33.04)와 `turn_count`(19)를 가르는 지점이고, 손으로 쓸 때
+가장 자주 틀리는 곳이다.
+
+계산이 들어간 뷰는 만들지 못한다. 누적 잔액(`v_resource_ledger`), 중복 제거
+(`v_party_ledger`), 두 이벤트를 한 축으로 묶기(`v_damage`) 는 무엇을 보고
+싶은지 사람이 정해야 한다. 그런 뷰는 `views.sql` 에 두면 생성기가 비켜 간다
+(`WHERE e.name = ...` 을 읽어 해당 이벤트를 건너뛴다).
+
+따로 돌리거나 파일로 받고 싶으면
+
+```bash
+# 파일로 받기 (views_generated.sql)
+python viewgen.py --db playtest.sqlite --skip-existing views.sql
+
+# 파일 없이 DB 에 바로
+python viewgen.py --db playtest.sqlite --skip-existing views.sql --apply --no-file
+```
+
+`--skip-existing` 을 빼면 손으로 쓴 뷰가 다루는 이벤트까지 만든다. 이름이
+달라서(`v_battles` vs `v_battle_ended`) 덮어쓰지는 않지만 같은 데이터를 보는
+뷰가 둘이 된다.
+
 ## 저장소를 SQLite 로 한 이유
 
 후보는 SQLite 와 DuckDB 였다. 분석 질의만 보면 DuckDB 가 유리하지만
@@ -46,18 +122,65 @@
 ```bash
 pip install pyyaml          # 이게 전부다. sqlite3 는 파이썬에 내장되어 있다.
 
-# 1. 적재 (뷰까지 자동으로 만든다)
+# 한 명령으로 전부
+python pipeline.py <로그폴더> --reset --push
+```
+
+단계를 따로 돌리고 싶으면 아래처럼 한다. **순서가 중요하다.**
+
+```bash
+# 1. 적재 (기본 뷰까지 만든다)
 python loader.py <로그폴더> --db playtest.sqlite --reset
 
 # 2. 협동 세션 병합 (1인 세션만 있어도 돌려두면 된다 — 아무것도 바뀌지 않는다)
 python merge.py --db playtest.sqlite --show
 
-# 3. 지표 계산
+# 3. 이벤트마다 뷰 생성 — 반드시 2번 뒤에
+python viewgen.py --db playtest.sqlite --skip-existing views.sql --apply --no-file
+
+# 4. 지표 계산
 python metrics.py hybridrpg.yaml --db playtest.sqlite --show
 
-# 4. Metabase 카드 생성/갱신 (지표마다 카드 한 장까지 원하면 --from-yaml)
+# 5. Metabase 카드 생성/갱신 (지표마다 카드 한 장까지 원하면 --from-yaml)
 python metabase_api.py --db-file playtest.sqlite --push --from-yaml hybridrpg.yaml
 ```
+
+**3번이 2번 뒤인 것이 중요하다.** 협동 세션에서 참가자마다 복제되는 이벤트를
+걸러낸 뷰를 만들려면 `merge.py` 가 먼저 판정을 끝내야 한다. 적재 직후에 돌리면
+`canonical` 이 전부 1 이라 필터가 붙지 않는다. `pipeline.py` 는 이 순서를
+한 곳에 박아둔 것이다.
+
+```
+$ python pipeline.py testlogs --reset --push
+
+[1/5] 적재 — testlogs → playtest.sqlite
+      0.4초 — 파일 14개, 이벤트 600건
+[2/5] 협동 세션 병합
+      0.1초 — 중복 17행 제외 (3종 이벤트)
+[3/5] 이벤트 뷰 생성
+      0.1초 — 뷰 26개 (중복 이벤트 2종은 canonical=1 만 본다: gold_observed, monster_killed)
+[4/5] 지표 계산 — hybridrpg.yaml
+      0.2초 — metric_results 327행
+[5/5] Metabase 카드 반영
+      1.1초 — 카드 반영 완료
+```
+
+단계별 상세 출력은 기본으로 접어둔다. 경고와 오류는 접히지 않고, 전부 보려면
+`-v` 를 붙인다. 한 단계가 실패하면 그 단계의 출력을 전부 펴서 보여주고 멈춘다.
+
+`--skip-load` 는 적재를 건너뛰고 뒷단계만 다시 돌린다. 지표 정의만 고쳤을 때
+쓴다. 30만 이벤트(세션 50개 × 4인) 기준 전체 23.6초, 적재를 건너뛰면 9.6초다.
+
+### 돌아가는 동안 대시보드에 보이는 것
+
+각 단계는 그 자체로 원자적이다 — 적재는 전부 아니면 전무이고, 지표는 지웠다
+다시 쓰는 것이 한 트랜잭션이라 비어 있는 중간 상태가 보이지 않는다. 지표
+정의가 틀리면 아무것도 쓰지 않고 직전 값이 남는다.
+
+다만 **단계 사이**는 커밋된다. 돌아가는 동안 대시보드를 켜 두면 몇 초간
+"새 이벤트 + 옛 지표" 같은 상태가 보인다. 전부를 한 트랜잭션으로 묶으려면
+`merge.py` 와 `metrics.py` 가 자기 커밋을 하지 않도록 고쳐야 하는데, 지금
+규모에서는 그만한 값어치가 없다고 보고 두었다.
 
 4번은 `METABASE_URL` 과 `METABASE_API_KEY` 환경변수를 읽는다. PowerShell 에는
 `export` 가 없으니 `$env:METABASE_URL = "http://localhost:3000"` 으로 설정한다.
@@ -120,8 +243,8 @@ docker run -d -p 3000:3000 \
 
 연결 후 **동기화**를 돌리면 뷰도 테이블처럼 잡힌다.
 
-카드는 손으로 만들지 않는다. `metabase_api.py --push` 가 `cards.py` 의 카드와
-정의 파일에서 생성한 카드를 만들고, 다시 돌리면 **지우지 않고 갱신한다** —
+카드는 손으로 만들지 않는다. `metabase_api.py --push` 가 `cardgen.py` 로
+정의 파일에서 생성한 카드와 (있으면) `cards.py` 의 게임 전용 카드를 만들고, 다시 돌리면 **지우지 않고 갱신한다** —
 카드 id 가 유지돼야 대시보드에 올려둔 것이 떨어지지 않는다. 사람이 Metabase
 에서 바꾼 차트 모양도 덮어쓰지 않는다. 보내기 전에 로컬 SQLite 로 쿼리를
 먼저 돌려보고, 깨진 것이 하나라도 있으면 아무것도 올리지 않는다.
@@ -358,8 +481,9 @@ Steam 기반 게임이라면 SteamID 를 해시해서 쓰면 되고, 지금 구�
 ## 아직 안 된 것
 
 - **영속 플레이어 식별자** — 위 제약 참조. 세션 간 비교가 필요해지면 먼저 해결해야 한다.
-- **`views.sql` 자동 생성** — 게임별 뷰는 아직 손으로 쓴다. 생성기 프로토타입은
-  검증했지만(19/19) 본체에 넣지 않았다.
+- **`views.sql` 의 게임 전용 층 분리** — 이벤트별 뷰는 `viewgen.py` 가 만들지만,
+  손으로 쓴 게임 전용 뷰(`v_battles` 등)가 같은 파일에 있어 다른 게임에도 딸려간다.
+  빈 뷰가 생길 뿐 해는 없지만, 중립 층과 갈라두는 편이 맞다.
 - **시계 보정 적용** — `clock_offset_ms` 는 여전히 0 으로 기록된다.
   측정값(위 +167ms)을 `JoinSession` 의 `hostOffsetMs` 에 넣으면 `t_ms` 가 정렬된다.
 - **행 단위 계산식** — `player_hp / player_max_hp` 처럼 같은 행의 두 파라미터를
