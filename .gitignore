@@ -11,5 +11,9 @@ __pycache__/
 # Metabase 실행 파일·내부 DB
 metabase/
 
+# 게임 정의 파일 — 게임마다 따로 갖는다. 틀은 game.example.yaml
+game.yaml
+hybridrpg.yaml
+
 # 비밀 정보
 .env

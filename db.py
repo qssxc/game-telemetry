@@ -13,6 +13,9 @@ def connect(db_path: str, fast: bool = False, readonly=False):
         con.execute("PRAGMA cache_size = -64000")   # 64MB
     return con
 
+# 칼럼의 선언 타입은 SQLite 에서 저장 방식을 거의 결정하지 않지만,
+# Metabase 가 칼럼 종류(날짜/불리언/숫자)를 판별할 때 이 선언을 읽는다.
+# 그래서 TEXT 로 뭉개지 않고 의미에 맞게 선언한다.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     session_id       TEXT    NOT NULL,
@@ -97,6 +100,8 @@ CREATE INDEX IF NOT EXISTS ix_metrics_lookup
     ON metric_results (scope, session_id, player_id, metric_name);
 """
 
+# SQLite 는 인덱스가 없으면 매번 전체 스캔을 한다. 조회 패턴은 "이벤트를
+# 이름으로 걸러낸 뒤 각 이벤트의 파라미터를 집는다" 이다.
 INDEXES = """
 CREATE INDEX IF NOT EXISTS ix_params_lookup
     ON event_params (session_id, player_id, seq, key);

@@ -77,6 +77,7 @@ def run_step(n: int, total: int, title: str, fn, verbose: bool) -> None:
 # ------------------------------------------------------------------ 단계
 
 def do_load(con, log_dir: pathlib.Path, reset: bool, views: pathlib.Path) -> str:
+    import db
     import loader
     files = sorted(log_dir.glob("*.ndjson"))
     if not files:
@@ -94,7 +95,7 @@ def do_load(con, log_dir: pathlib.Path, reset: bool, views: pathlib.Path) -> str
         con.rollback()           # 옛 데이터가 그대로 남는다
         raise StepFailed(f"적재 실패 — 기존 데이터를 유지한다: {e}") from e
 
-    con.executescript(loader.INDEXES)
+    con.executescript(db.INDEXES)
     con.execute("ANALYZE")
     con.commit()
 
@@ -105,15 +106,27 @@ def do_load(con, log_dir: pathlib.Path, reset: bool, views: pathlib.Path) -> str
     return f"파일 {len(files)}개, 이벤트 {totals['events']}건{skipped}"
 
 
-def do_merge(con) -> str:
+def do_merge(con, yaml_path: pathlib.Path) -> str:
     import merge
-    if merge.merge(con) != 0:          # 0 이 성공. 건수가 아니다.
+    # 판정 규칙은 정의 파일의 merge: 섹션에 있다. 파일이 없으면 여기서 멈춘다 —
+    # 어차피 지표 단계에서 멈출 텐데, 규칙 없이 병합부터 해버리면 그 사이에
+    # 부풀려진 숫자가 보인다.
+    if not yaml_path.exists():
+        raise StepFailed(
+            f"정의 파일이 없다: {yaml_path}\n"
+            f"  game.example.yaml 을 game.yaml 로 복사해 고치거나, "
+            f"--yaml 로 파일을 지정하라")
+    try:
+        rules = merge.load_rules_file(yaml_path)
+    except merge.RulesError as e:
+        raise StepFailed(f"merge 규칙 오류 — {e}") from e
+    if merge.merge(con, rules) != 0:   # 0 이 성공. 건수가 아니다.
         raise StepFailed("병합 실패 — 위 메시지를 보라")
     n = con.execute("SELECT COUNT(*) FROM events WHERE canonical = 0").fetchone()[0]
     kinds = con.execute(
         "SELECT COUNT(DISTINCT name) FROM events WHERE canonical = 0").fetchone()[0]
     if not n:
-        return "중복 없음 (1인 세션만 있거나 merge.py 설정이 비어 있다)"
+        return "중복 없음 (1인 세션만 있거나 merge: 규칙이 없다)"
     return f"중복 {n}행 제외 ({kinds}종 이벤트)"
 
 
@@ -184,7 +197,7 @@ def main() -> int:
         description="적재 → 병합 → 뷰 → 지표 (→ Metabase) 를 한 번에 돌린다")
     ap.add_argument("log_dir", nargs="?", help="*.ndjson 이 들어있는 폴더")
     ap.add_argument("--db", default="playtest.sqlite")
-    ap.add_argument("--yaml", default=None, help="지표 정의 (기본: hybridrpg.yaml)")
+    ap.add_argument("--yaml", default=None, help="지표 정의 (기본: game.yaml)")
     ap.add_argument("--views", default=None, help="기본 뷰 (기본: views.sql)")
     ap.add_argument("--reset", action="store_true",
                     help="기존 내용을 비우고 새로 적재한다 (DB 파일은 유지한다)")
@@ -199,7 +212,7 @@ def main() -> int:
 
     db_path = pathlib.Path(args.db)
     views = pathlib.Path(args.views) if args.views else HERE / "views.sql"
-    yml = pathlib.Path(args.yaml) if args.yaml else HERE / "hybridrpg.yaml"
+    yml = pathlib.Path(args.yaml) if args.yaml else HERE / "game.yaml"
 
     if not args.skip_load and not args.log_dir:
         print("[오류] 로그 폴더를 지정하라 (또는 --skip-load)", file=sys.stderr)
@@ -208,8 +221,8 @@ def main() -> int:
         print(f"[오류] --skip-load 인데 DB 가 없다: {db_path}", file=sys.stderr)
         return 1
 
-    import loader
-    con = loader.connect(str(db_path), fast=True)
+    import db
+    con = db.connect(str(db_path), fast=True)
     total = 5 if args.push else 4
     started = time.monotonic()
 
@@ -226,7 +239,7 @@ def main() -> int:
 
         n += 1
         run_step(n, total, "협동 세션 병합",
-                 lambda: do_merge(con), args.verbose)
+                 lambda: do_merge(con, yml), args.verbose)
 
         n += 1
         run_step(n, total, "이벤트 뷰 생성",

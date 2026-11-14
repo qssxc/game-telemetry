@@ -1,0 +1,72 @@
+# 게임 정의 파일의 틀.
+#
+#   이 파일을 game.yaml 로 복사해서 자기 게임에 맞게 고친다.
+#   game.yaml 은 .gitignore 에 들어 있어 저장소에 올라가지 않는다.
+#
+#       python pipeline.py <로그폴더>                  # game.yaml 을 읽는다
+#       python pipeline.py <로그폴더> --yaml 다른이름.yaml
+#
+# 아래 이벤트·파라미터 이름은 전부 예시다. 자기 게임의 로그에 실제로 찍히는
+# 이름으로 바꾼다. 로그에 없는 이벤트를 적어도 오류는 아니고 값이 안 나올 뿐이다.
+
+# ------------------------------------------------------------------ 지표
+#
+#   type    count | sum | avg | min | max | formula
+#   scope   session(기본, 세션×플레이어) | party(세션 전체) | global
+#   where   파라미터 조건. 값 그대로 쓰면 "같다", {lt|lte|gt|gte|ne: 값} 도 된다
+#   by      이 파라미터로 쪼개서 계산한다
+#   default 해당 이벤트가 없는 세션에 채울 값 (0 이 "없음" 이 아니라 "0" 일 때만)
+metrics:
+  - name: level_count
+    type: count
+    event: level_completed
+
+  - name: level_cleared
+    type: count
+    event: level_completed
+    where: { is_success: true }
+
+  - name: clear_rate
+    type: formula
+    formula: level_cleared / level_count
+
+  - name: avg_level_time_ms
+    type: avg
+    event: level_completed
+    param: elapsed_ms
+
+  - name: coins_spent
+    type: sum
+    event: coins_changed
+    param: delta
+    where: { delta: { lt: 0 } }
+    default: 0
+
+  - name: deaths_by_level
+    type: count
+    event: player_died
+    by: level_id
+
+# ------------------------------------------------------------ 협동 세션 병합
+#
+# 1인 게임이면 이 섹션을 쓰지 않는다.
+#
+# 여러 명이 한 세션에 들어가고 참가자마다 로그 파일이 따로 생기는 게임이면,
+# 같은 사건이 파일마다 한 번씩 기록되는 이벤트를 여기에 적는다. 적지 않으면
+# 합계가 참가자 수만큼 부풀려진다(오류는 나지 않는다).
+#
+# 무엇을 적어야 할지 모르겠으면 2인 세션 로그를 적재한 뒤
+#     python merge_check.py --db playtest.sqlite
+# 를 돌린다. 두 파일에 같은 내용으로 들어 있는 이벤트를 후보로 짚어준다.
+#
+# merge:
+#   shared_state:                      # 파티가 공유하는 상태
+#     coins_changed:
+#       key: [currency, delta, balance]   # 모든 클라이언트에서 같은 값만
+#       only: { currency: [party_gold] }  # 선택 — 이 값일 때만 공유로 본다
+#   broadcast:                         # 호스트/서버가 전원에게 알리는 사건
+#     boss_defeated: [boss_id, spawn_id]
+#   reason_correction:                 # 선택 — 사유를 뒤늦게 알려주는 이벤트
+#     event: coins_reason_corrected
+#     target: coins_changed
+#     match: [currency, delta]

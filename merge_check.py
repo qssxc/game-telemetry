@@ -9,10 +9,14 @@
   4. 파티 공유 자원이 이중으로 기록되는가       ← 합계가 두 배가 되는 문제
   5. 두 PC 의 시계가 얼마나 벌어져 있는가
 
+정의 파일을 주면 그 merge: 규칙을 기준으로 판정하고, 규칙이 없는 이벤트 중
+**두 파일에 같은 내용으로 들어 있는 것**을 중복 후보로 짚어준다. 새 게임에
+규칙을 처음 쓸 때는 정의 파일 없이 돌려 후보부터 본다.
+
 사용법
 ------
     python loader.py <로그폴더> --db playtest.sqlite --reset
-    python merge_check.py --db playtest.sqlite
+    python merge_check.py [game.yaml] --db playtest.sqlite
 """
 
 from __future__ import annotations
@@ -26,38 +30,12 @@ from collections import defaultdict
 from typing import Any
 
 from db import connect
-
-# 클라이언트가 로컬에서 계산하는 값들. 같은 사건이라도 파일마다 다르므로
-# 중복 판정 키에서 빼야 한다.
-LOCAL_ONLY_PARAMS = {
-    "elapsed_ms", "decision_ms", "turn_no", "turn_count",
-    "player_hp", "monster_hp", "player_hp_after", "monster_hp_after",
-    "player_hp_remaining", "monster_hp_remaining",
-    "usable_count", "total_count",
-}
-
-# 설계상 각자 기록하는 것들("사건의 주인" 규칙). 두 파일에 다 있어도 중복이 아니다.
-OWNED_EVENTS = {
-    "session_started", "session_ended", "game_started",
-    "battle_started", "battle_ended", "battle_rewarded",
-    "turn_started", "turn_skipped", "player_action", "skill_panel_opened",
-    "damage_dealt", "damage_taken", "heal_applied", "status_applied",
-    "item_purchased", "item_sold", "item_purchase_failed", "item_equipped",
-    "resource_reason_corrected",
-}
-
-# 파티가 공유하는 상태. 한 명이 일으킨 변화를 모두가 관측하므로, 각 파일이
-# 같은 사건을 한 번씩 기록한다. 합치면 참가자 수만큼 부풀려진다.
-#
-# 판정 키에 balance 를 쓴다. 서버가 보낸 공유 잔액이라 모든 클라이언트에서
-# 같은 값이고, 연속된 거래라도 잔액은 매번 달라 충돌하지 않는다.
-SHARED_STATE_EVENTS = {
-    "resource_changed": ("resource_id", "delta", "balance"),
-    "gold_observed": ("balance",),
-}
+from merge import Rules, RulesError, dedup_key, load_rules_file
 
 # 시계 오차를 재기 위한 왕복 쌍. 한 플레이어의 사건과, 상대가 그것을 관측한
-# 이벤트를 짝지운다. 게임마다 다르므로 원래는 게임 정의 파일에 있어야 한다.
+# 이벤트를 짝지운다. **이것만은 아직 HybridRPG 전용이다** — 관측 대상을
+# player_id 로 바꾸는 규칙("p" + user_id)까지 게임에 묶여 있어 정의 파일로
+# 옮기지 못했다. 다른 게임에서는 맞는 쌍이 없어 "분리할 수 없다" 고만 나온다.
 #   (관측 이벤트, 관측 대상을 가리키는 파라미터, 당사자 쪽 원인 이벤트)
 ROUNDTRIP_PAIRS = [
     ("player_downed", "user_id", "battle_ended"),
@@ -95,19 +73,15 @@ def load_events(con: sqlite3.Connection, session_id: str, player_id: str) -> lis
     ]
 
 
-def shared_key(event: dict) -> tuple:
-    """로컬 계산값을 뺀 나머지 파라미터로 만든 중복 판정 키."""
+def content_key(event: dict) -> tuple:
+    """이름과 파라미터 전부로 만든 키. 규칙이 없는 이벤트의 중복 후보를 찾는다.
+
+    로컬에서 계산한 값(경과 시간 등)이 섞인 이벤트는 같은 사건이어도 여기서
+    안 맞는다. 그래서 이 키로 찾은 것은 "확실한 후보" 이고, 못 찾았다고
+    중복이 없다는 뜻은 아니다.
+    """
     return (event["name"],) + tuple(sorted(
-        (k, v) for k, v in event["params"].items() if k not in LOCAL_ONLY_PARAMS
-    ))
-
-
-def state_key(event: dict) -> tuple | None:
-    """공유 상태 이벤트의 판정 키. 해당 이벤트가 아니면 None."""
-    fields = SHARED_STATE_EVENTS.get(event["name"])
-    if fields is None:
-        return None
-    return (event["name"],) + tuple(event["params"].get(f) for f in fields)
+        (k, repr(v)) for k, v in event["params"].items()))
 
 
 # ------------------------------------------------------------------ 보고
@@ -136,85 +110,96 @@ def report_composition(con, session_id, players) -> list[str]:
     return hosts
 
 
-def report_distribution(ev_by_player: dict[str, list[dict]]) -> tuple[list[str], list[str]]:
+def report_distribution(ev_by_player: dict[str, list[dict]],
+                        rules: Rules) -> tuple[list[str], list[str]]:
     print("\n[2] 이벤트 분포")
     players = list(ev_by_player)
     counts = {p: defaultdict(int) for p in players}
+    # 규칙이 없는 이벤트에서, 다른 파일에 같은 내용으로 있는 행을 센다.
+    seen_by: dict[tuple, set[str]] = defaultdict(set)
     for p, evs in ev_by_player.items():
         for e in evs:
             counts[p][e["name"]] += 1
+            seen_by[content_key(e)].add(p)
+    same_content: dict[str, int] = defaultdict(int)
+    for key, who in seen_by.items():
+        if len(who) > 1:
+            same_content[key[0]] += 1
 
     names = sorted({n for c in counts.values() for n in c})
-    broadcast, shared = [], []
+    broadcast, shared, candidates = [], [], []
 
     head = "    {:<28}".format("이벤트") + "".join(f"{p:>6}" for p in players) + "   판정"
     print(head)
-    print("    " + "-" * 28 + "-" * (6 * len(players)) + "   " + "-" * 26)
+    print("    " + "-" * 28 + "-" * (6 * len(players)) + "   " + "-" * 30)
     for n in names:
         present = [p for p in players if counts[p][n]]
-        if n in SHARED_STATE_EVENTS and len(present) > 1:
-            verdict = "★ 공유 상태 — 중복"
-            shared.append(n)
-        elif n in OWNED_EVENTS:
-            verdict = "각자 기록 (중복 아님)"
-        elif len(present) > 1:
-            verdict = "★ 브로드캐스트 — 중복"
-            broadcast.append(n)
-        else:
+        if len(present) < 2:
             verdict = "한쪽만"
+        elif n in rules.shared_state:
+            verdict = "★ 공유 상태 — 규칙 있음"
+            shared.append(n)
+        elif n in rules.broadcast:
+            verdict = "★ 브로드캐스트 — 규칙 있음"
+            broadcast.append(n)
+        elif same_content.get(n):
+            verdict = f"? 규칙 없음 — 같은 내용 {same_content[n]}건"
+            candidates.append(n)
+        else:
+            verdict = "각자 기록 (규칙 없음)"
         row = "    {:<28}".format(n) + "".join(f"{counts[p][n]:>6}" for p in players)
         print(f"{row}   {verdict}")
 
+    if candidates:
+        print(f"\n    → 중복 후보 {len(candidates)}종: {', '.join(candidates)}")
+        print("      두 파일에 파라미터까지 똑같은 행이 있다. 한 사건을 각자 기록한")
+        print("      것이라면 정의 파일의 merge: 섹션에 규칙을 적어야 한다.")
+        print("      (session_started 처럼 원래 각자 남기는 이벤트면 그대로 둔다)")
     return broadcast, shared
 
 
-def report_shared_state(ev_by_player: dict[str, list[dict]], shared: list[str]) -> None:
-    print("\n[3] 파티 공유 자원 — 합치면 몇 배가 되는가")
+def report_shared_state(ev_by_player: dict[str, list[dict]], shared: list[str],
+                        rules: Rules) -> None:
+    print("\n[3] 파티 공유 상태 — 합치면 몇 배가 되는가")
     if not shared:
-        print("    공유 상태 이벤트가 두 파일에 겹치지 않는다. 단순 합집합이 맞다.")
+        print("    공유 상태 규칙에 걸리는 이벤트가 두 파일에 겹치지 않는다.")
         return
 
-    players = list(ev_by_player)
     groups: dict[tuple, dict[str, dict]] = defaultdict(dict)
     for p, evs in ev_by_player.items():
         for e in evs:
-            k = state_key(e)
-            if k is not None and e["name"] in shared:
+            if e["name"] not in shared:
+                continue
+            k = dedup_key(e, rules)
+            if k is not None:
                 groups[k][p] = e
 
     dup = {k: v for k, v in groups.items() if len(v) > 1}
-    print(f"    고유 사건 {len(groups)}개 중 {len(dup)}개가 두 파일에 모두 있다")
+    print(f"    고유 사건 {len(groups)}개 중 {len(dup)}개가 여러 파일에 있다")
 
-    # 자원별 합계 비교
-    totals_raw: dict[str, float] = defaultdict(float)
-    totals_dedup: dict[str, float] = defaultdict(float)
+    by_event: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     for k, v in groups.items():
-        if k[0] != "resource_changed":
-            continue
-        rid, delta = k[1], k[2] or 0
-        totals_dedup[rid] += delta
-        totals_raw[rid] += delta * len(v)
-
-    for rid in sorted(totals_raw):
-        raw, ded = totals_raw[rid], totals_dedup[rid]
-        factor = (raw / ded) if ded else float("nan")
-        print(f"    {rid}: 단순 합계 {raw:+,.0f}  →  중복 제거 후 {ded:+,.0f}  ({factor:.1f}배)")
+        by_event[k[0]][0] += 1
+        by_event[k[0]][1] += len(v)
+    for name in sorted(by_event):
+        uniq, raw = by_event[name]
+        print(f"    {name}: 단순 합치면 {raw}행  →  실제 사건 {uniq}개  ({raw / uniq:.1f}배)")
 
     # 사유 충돌 — 어느 쪽을 남길지
     conflicts = 0
     for k, v in dup.items():
-        reasons = {p: e["params"].get("reason") for p, e in v.items()}
-        known = [r for r in reasons.values() if r and r != "unknown"]
-        if known:
+        reasons = [e["params"].get(rules.reason_param) for e in v.values()]
+        if any(r and r != rules.unknown for r in reasons) and \
+                any(not r or r == rules.unknown for r in reasons):
             conflicts += 1
     if conflicts:
-        print(f"\n    사유가 갈리는 사건 {conflicts}개 — 한쪽은 구체적 사유, 다른 쪽은 \"unknown\"")
-        print("    → 병합 규칙: 사유를 아는 행을 남기고 unknown 행을 버린다.")
-        print("      행위자의 클라이언트만 사유를 알고, 나머지는 잔액 변화만 본다.")
-        print("      resource_reason_corrected 이벤트가 있으면 그 사유를 먼저 적용한다.")
+        print(f"\n    사유가 갈리는 사건 {conflicts}개 — 한쪽만 사유를 안다")
+        print("    → 병합 규칙: 사유를 아는 행을 남긴다. 행위자의 클라이언트만")
+        print("      사유를 알고, 나머지는 변화만 본다.")
 
 
-def report_clock(ev_by_player: dict[str, list[dict]], broadcast: list[str]) -> None:
+def report_clock(ev_by_player: dict[str, list[dict]], broadcast: list[str],
+                 rules: Rules) -> None:
     print("\n[4] 시계 차이")
     players = list(ev_by_player)
     if len(players) != 2:
@@ -276,13 +261,16 @@ def report_clock(ev_by_player: dict[str, list[dict]], broadcast: list[str]) -> N
     index_b: dict[tuple, list[dict]] = defaultdict(list)
     for e in ev_b:
         if e["name"] in broadcast:
-            index_b[shared_key(e)].append(e)
+            k = dedup_key(e, rules)
+            if k is not None:
+                index_b[k].append(e)
 
     deltas = []
     for e in ev_a:
         if e["name"] not in broadcast:
             continue
-        pool = index_b.get(shared_key(e))
+        k = dedup_key(e, rules)
+        pool = index_b.get(k) if k is not None else None
         if pool and e["wall"]:
             partner = pool.pop(0)
             if partner["wall"]:
@@ -294,22 +282,37 @@ def report_clock(ev_by_player: dict[str, list[dict]], broadcast: list[str]) -> N
         print("    이 값은 시계 오차와 전달 지연이 섞여 있어 그대로 쓰면 안 된다.")
 
 
-def check_session(con, session_id: str, players: list[str]) -> None:
+def check_session(con, session_id: str, players: list[str], rules: Rules) -> None:
     print(f"\n{'=' * 72}")
     print(f"세션 {session_id} — 플레이어 {len(players)}명")
     print("=" * 72)
 
     report_composition(con, session_id, players)
     ev_by_player = {p: load_events(con, session_id, p) for p in players}
-    broadcast, shared = report_distribution(ev_by_player)
-    report_shared_state(ev_by_player, shared)
-    report_clock(ev_by_player, broadcast)
+    broadcast, shared = report_distribution(ev_by_player, rules)
+    report_shared_state(ev_by_player, shared, rules)
+    report_clock(ev_by_player, broadcast, rules)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="협동 세션 병합 가능 여부를 검사한다")
+    ap.add_argument("definition", nargs="?",
+                    help="정의 파일 YAML. 생략하면 규칙 없이 중복 후보만 찾는다")
     ap.add_argument("--db", default="playtest.sqlite")
     args = ap.parse_args()
+
+    rules = Rules()
+    if args.definition:
+        try:
+            rules = load_rules_file(args.definition)
+        except OSError as e:
+            print(f"[오류] 정의 파일을 읽지 못했다: {e}", file=sys.stderr)
+            return 1
+        except RulesError as e:
+            print(f"[규칙 오류] {e}", file=sys.stderr)
+            return 1
+    if rules.empty:
+        print("merge 규칙 없이 본다 — 두 파일에 같은 내용으로 있는 이벤트를 후보로 짚는다")
 
     con = connect(args.db)
 
@@ -332,7 +335,7 @@ def main() -> int:
         return 1
 
     for sid, pl in multi.items():
-        check_session(con, sid, pl)
+        check_session(con, sid, pl, rules)
 
     con.close()
     return 0

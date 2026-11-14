@@ -74,8 +74,22 @@ IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def event_names(con: sqlite3.Connection) -> list[str]:
-    return [r[0] for r in con.execute(
-        "SELECT DISTINCT name FROM events WHERE name IS NOT NULL ORDER BY name")]
+    """뷰를 만들 수 있는 이벤트 이름.
+
+    이벤트 이름은 뷰 이름(v_<이름>)과 WHERE 절의 문자열에 그대로 들어간다.
+    `ui.click` 같은 이름이 하나 섞이면 `CREATE VIEW v_ui.click` 이 되어
+    SQLite 가 v_ui 를 데이터베이스 이름으로 읽고, 한 트랜잭션으로 묶인
+    뷰 생성 전체가 실패한다. 파라미터 키와 같은 규칙으로 먼저 거른다.
+    걸러진 이벤트도 events 와 event_flat 에서는 그대로 보인다.
+    """
+    out = []
+    for (name,) in con.execute(
+            "SELECT DISTINCT name FROM events WHERE name IS NOT NULL ORDER BY name"):
+        if IDENT.match(name):
+            out.append(name)
+        else:
+            print(f"  [건너뜀] 이벤트 {name!r} — 뷰 이름으로 쓸 수 없다")
+    return out
 
 
 def param_types(con: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:
@@ -131,8 +145,8 @@ def dup_events(con: sqlite3.Connection) -> set[str]:
     """중복으로 걸러진 행(canonical = 0)이 실제로 있는 이벤트.
 
     merge.py 의 설정을 읽지 않는다. **데이터만 본다.** 어떤 이벤트가 협동
-    세션에서 참가자 수만큼 복제되는지는 게임마다 다르고, 그 지식은 merge.py
-    설정에 있다. 그걸 여기서 또 읽으면 이 파일이 게임을 알게 된다.
+    세션에서 참가자 수만큼 복제되는지는 게임마다 다르고, 그 지식은 정의 파일의
+    merge: 섹션에 있다. 그걸 여기서 또 읽으면 이 파일이 게임을 알게 된다.
     대신 merge.py 가 남긴 결과(canonical)를 보면 이름을 몰라도 알 수 있다.
 
     그래서 이 함수는 merge.py 가 **돌아간 뒤에** 불려야 뜻이 있다.

@@ -380,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="보내지 않고 무엇이 바뀔지만 보여준다")
     ap.add_argument("--from-yaml", default=None,
                     help="지표 정의 YAML 에서 지표마다 카드를 만든다 "
-                         "(예: hybridrpg.yaml)")
+                         "(예: game.yaml)")
     args = ap.parse_args(argv)
 
     url = args.url or os.environ.get("METABASE_URL", "http://localhost:3000")

@@ -17,16 +17,16 @@
 
 | 중립 — 그대로 쓴다 | 게임 전용 — 새로 쓴다 |
 |---|---|
-| `loader.py` `metrics.py` `viewgen.py` | 지표 정의 YAML (`hybridrpg.yaml`) |
-| `cardgen.py` `metabase_api.py` | **`merge.py` 의 이벤트 설정** (아래) |
+| `loader.py` `metrics.py` `viewgen.py` | 지표 정의 YAML (`game.yaml`) |
+| `cardgen.py` `metabase_api.py` `merge.py` | 그 YAML 의 `merge:` 섹션 (협동 게임만) |
 | `views.sql` 의 기본 뷰·지표 뷰 층 | `views.sql` 의 게임 전용 뷰 층 |
 | | `cards.py` (손으로 쓴 카드, **선택**) |
 
-> `merge.py` 는 **중립이 아니다.** 파일 윗부분의 `SHARED_STATE_KEYS` 와
-> `BROADCAST_KEYS` 에 이 게임의 이벤트 이름 9개가 들어 있다. 어떤 이벤트가
-> 협동 세션에서 참가자마다 복제되는지는 게임마다 다르므로, 새 게임은 이
-> 두 딕셔너리를 자기 이벤트로 바꿔야 한다. 비워 두면 중복 판정을 하지 않을
-> 뿐 나머지는 정상 동작한다.
+> 어떤 이벤트가 협동 세션에서 참가자마다 복제되는지는 게임마다 다르다.
+> 그 지식은 `merge.py` 코드가 아니라 **정의 파일의 `merge:` 섹션**에 적는다
+> ([아래](#협동-세션-병합-mergepy)). 1인 게임은 섹션을 쓰지 않으면 된다.
+> 2인 이상 세션이 있는데 섹션이 없으면 `[경고]` 가 뜬다 — 그대로 두면
+> 공유 자원이 참가자 수만큼 부풀려진 숫자가 오류 없이 나오기 때문이다.
 
 **새 게임을 붙이는 데 필요한 최소한은 지표 정의 YAML 하나다.** 중립 파일만
 가져다 놓고 YAML 을 쓰면 적재부터 Metabase 카드까지 간다. `cards.py` 는 그
@@ -59,7 +59,7 @@ v_monster_killed_all   2건   ← 원본. 병합이 제대로 됐는지 볼 때
 달라지지 않는다.
 
 **이 판단에 이벤트 이름이 쓰이지 않는다.** 어떤 이벤트가 복제되는지는
-`merge.py` 설정이 알고 있고, `viewgen.py` 는 그 결과(`canonical` 칼럼)만 본다.
+정의 파일의 `merge:` 섹션이 알고 있고, `viewgen.py` 는 그 결과(`canonical` 칼럼)만 본다.
 그래서 설정이 없는 게임에서도 맞게 동작한다 — 중복 판정이 안 되면
 `canonical = 0` 이 없고, 필터도 안 붙는다.
 
@@ -133,16 +133,16 @@ python pipeline.py <로그폴더> --reset --push
 python loader.py <로그폴더> --db playtest.sqlite --reset
 
 # 2. 협동 세션 병합 (1인 세션만 있어도 돌려두면 된다 — 아무것도 바뀌지 않는다)
-python merge.py --db playtest.sqlite --show
+python merge.py game.yaml --db playtest.sqlite --show
 
 # 3. 이벤트마다 뷰 생성 — 반드시 2번 뒤에
 python viewgen.py --db playtest.sqlite --skip-existing views.sql --apply --no-file
 
 # 4. 지표 계산
-python metrics.py hybridrpg.yaml --db playtest.sqlite --show
+python metrics.py game.yaml --db playtest.sqlite --show
 
 # 5. Metabase 카드 생성/갱신 (지표마다 카드 한 장까지 원하면 --from-yaml)
-python metabase_api.py --db-file playtest.sqlite --push --from-yaml hybridrpg.yaml
+python metabase_api.py --db-file playtest.sqlite --push --from-yaml game.yaml
 ```
 
 **3번이 2번 뒤인 것이 중요하다.** 협동 세션에서 참가자마다 복제되는 이벤트를
@@ -159,7 +159,7 @@ $ python pipeline.py testlogs --reset --push
       0.1초 — 중복 17행 제외 (3종 이벤트)
 [3/5] 이벤트 뷰 생성
       0.1초 — 뷰 26개 (중복 이벤트 2종은 canonical=1 만 본다: gold_observed, monster_killed)
-[4/5] 지표 계산 — hybridrpg.yaml
+[4/5] 지표 계산 — game.yaml
       0.2초 — metric_results 327행
 [5/5] Metabase 카드 반영
       1.1초 — 카드 반영 완료
@@ -187,9 +187,12 @@ $ python pipeline.py testlogs --reset --push
 자세한 것은 `metabase_api.py` 머리말과 `METABASE.md` 에 있다.
 
 2인 세션을 처음 받았다면 병합 전에 `merge_check.py` 로 상태를 먼저 본다.
+정의 파일 없이 돌리면 두 파일에 같은 내용으로 들어 있는 이벤트를 **중복
+후보**로 짚어준다. `merge:` 규칙을 처음 쓸 때 여기서 시작한다.
 
 ```bash
-python merge_check.py --db playtest.sqlite
+python merge_check.py --db playtest.sqlite                 # 후보 찾기
+python merge_check.py game.yaml --db playtest.sqlite  # 규칙이 다 덮는지 확인
 ```
 
 `views.sql` 만 고쳤을 때는 다시 적재할 필요 없이
@@ -273,7 +276,15 @@ docker run -d -p 3000:3000 \
 
 ## 정의 파일
 
-`hybridrpg.yaml` 이 "무엇을 지표로 볼지" 를 정한다. 게임에는 들어가지 않는다.
+`game.yaml` 이 "무엇을 지표로 볼지" 를 정한다. 게임에는 들어가지 않는다.
+저장소에는 틀인 `game.example.yaml` 만 있다 — 복사해서 자기 게임에 맞게 고친다.
+`game.yaml` 은 `.gitignore` 에 있어 올라가지 않는다. 다른 이름을 쓰려면
+`pipeline.py --yaml 이름.yaml` 로 지정한다.
+
+```bash
+cp game.example.yaml game.yaml      # PowerShell: Copy-Item game.example.yaml game.yaml
+```
+
 고치고 `metrics.py` 를 다시 돌리면 새 지표가 나온다. **게임을 다시 빌드할
 필요가 없다** — 이게 이 구조의 요점이다.
 
@@ -402,6 +413,32 @@ JDBC 드라이버의 SQLite 빌드는 우리가 고를 수 없으므로,
 병합 단계가 그 사유를 원래 행에 되돌려 붙인다.
 
 ### 2. 중복 판정
+
+무엇을 중복으로 볼지는 정의 파일에 적는다. `merge.py` 는 이벤트 이름을 모른다.
+
+```yaml
+merge:
+  shared_state:                        # 파티가 공유하는 상태
+    resource_changed:
+      key: [resource_id, delta, balance]
+      only: { resource_id: [gold] }    # 선택 — 이 값일 때만 공유로 본다
+    gold_observed: [balance]           # key 만 있으면 목록으로 줄여 쓴다
+  broadcast:                           # 서버가 전원에게 뿌리는 알림
+    monster_killed: [raw_id, monster_id]
+    player_downed: [user_id]
+  reason_correction:                   # 선택 — 위 "1. 사유 보정" 의 모양
+    event: resource_reason_corrected
+    target: resource_changed
+    match: [resource_id, delta]
+```
+
+- **`key`** 에는 모든 클라이언트에서 같은 값만 넣는다. `elapsed_ms` 처럼
+  클라이언트가 로컬에서 계산한 값을 넣으면 같은 사건이 갈라진다.
+- **`only`** 는 한 이벤트가 공유 자원과 개인 자원을 함께 나를 때 쓴다. 없으면
+  두 사람이 우연히 같은 개인 변동(둘 다 경험치 +50)을 겪었을 때 한쪽이
+  지표에서 빠진다. 반대로 공유 자원을 `only` 에서 빠뜨리면 그 자원이
+  부풀려진다.
+- 모르는 키(`brodcast:` 같은 오타)가 있으면 멈추고 알려준다.
 
 | 분류 | 예 | 판정 키 |
 |---|---|---|
