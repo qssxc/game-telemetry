@@ -26,8 +26,8 @@ INTEGER 로 자르면 안 되고, turn_count 는 잘라야 읽기 좋다. 데이
 --------------
 계산이 들어간 뷰는 못 만든다. 누적 잔액(v_resource_ledger), 중복 제거
 (v_party_ledger), 두 이벤트를 한 축으로 묶기(v_damage) 같은 것은 사람이
-무엇을 보고 싶은지 정해야 나온다. 그런 뷰는 views.sql 에 그대로 두고,
-여기서는 --skip-existing 으로 건너뛴다.
+무엇을 보고 싶은지 정해야 나온다. 그런 뷰는 games/<게임>/views.sql 에
+손으로 쓰고, 여기서는 --skip-existing 으로 건너뛴다.
 
 merge.py 뒤에 돌려야 한다
 ------------------------
@@ -47,7 +47,7 @@ merge.py 뒤에 돌려야 한다
 
 사용법
 -----
-    python viewgen.py --db playtest.sqlite --skip-existing views.sql --apply --no-file
+    python viewgen.py --db playtest.sqlite --skip-existing games/mygame/views.sql --apply --no-file
 
 PowerShell 에서도 리다이렉션 없이 쓸 수 있게 --out 과 --apply 를 둔다.
 """
@@ -293,7 +293,7 @@ def main() -> int:
         "-- 이벤트 하나당 뷰 하나. 칼럼과 타입은 DB 에 실제로 들어 있는 값에서\n"
         "-- 알아냈다. 계측을 늘린 뒤 다시 돌리면 새 이벤트의 뷰가 따라온다.\n"
         "--\n"
-        "-- 누적 잔액이나 중복 제거처럼 사람이 정해야 하는 뷰는 views.sql 에 있다.\n\n"
+        "-- 누적 잔액이나 중복 제거처럼 사람이 정해야 하는 뷰는 게임 폴더의 views.sql 에 쓴다.\n\n"
     )
     sql = header + "\n".join(parts)
 

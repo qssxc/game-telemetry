@@ -32,16 +32,6 @@ from typing import Any
 from db import connect
 from merge import Rules, RulesError, dedup_key, load_rules_file
 
-# 시계 오차를 재기 위한 왕복 쌍. 한 플레이어의 사건과, 상대가 그것을 관측한
-# 이벤트를 짝지운다. **이것만은 아직 HybridRPG 전용이다** — 관측 대상을
-# player_id 로 바꾸는 규칙("p" + user_id)까지 게임에 묶여 있어 정의 파일로
-# 옮기지 못했다. 다른 게임에서는 맞는 쌍이 없어 "분리할 수 없다" 고만 나온다.
-#   (관측 이벤트, 관측 대상을 가리키는 파라미터, 당사자 쪽 원인 이벤트)
-ROUNDTRIP_PAIRS = [
-    ("player_downed", "user_id", "battle_ended"),
-]
-
-
 def parse_clock(value: Any) -> dt.datetime | None:
     if not value:
         return None
@@ -214,13 +204,14 @@ def report_clock(ev_by_player: dict[str, list[dict]], broadcast: list[str],
     # 전달 지연이고, 미지수가 둘인데 식이 하나이기 때문이다.
     # 양쪽이 서로를 관측한 쌍이 있으면 식이 둘이 되어 풀린다.
     estimates = []
-    for obs_name, who_param, anchor_name in ROUNDTRIP_PAIRS:
+    for pair in rules.clock_pairs:
+        obs_name = pair.observed
         legs = []
         for src, dst in ((a, b), (b, a)):
-            own = [e for e in ev_by_player[src] if e["name"] == anchor_name and e["wall"]]
+            own = [e for e in ev_by_player[src] if e["name"] == pair.cause and e["wall"]]
             seen = [e for e in ev_by_player[dst]
                     if e["name"] == obs_name and e["wall"]
-                    and f"p{int(e['params'].get(who_param, -1))}" == src]
+                    and pair.player_of(e) == src]
             if not own or not seen:
                 continue
             # 관측 직전의 당사자 사건을 원인으로 본다
@@ -252,6 +243,8 @@ def report_clock(ev_by_player: dict[str, list[dict]], broadcast: list[str],
             if abs(offset) > 1.0:
                 print("    → [경고] 시계 오차가 1초를 넘는다. 두 PC 시계를 맞출 것")
     else:
+        if not rules.clock_pairs:
+            print("    정의 파일에 merge.clock_pairs 가 없다 — 시계 오차를 재려면 적는다.")
         print("    서로를 관측한 왕복 쌍이 없어 시계 오차를 분리할 수 없다.")
         print("    → 병합은 wall_clock 정렬로만 한다.")
 

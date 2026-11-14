@@ -30,6 +30,11 @@ canonical = 1 만 보면 되고, 클라이언트별 분석은 전부 보면 된�
         event: resource_reason_corrected
         target: resource_changed
         match: [resource_id, delta]
+      clock_pairs:                       # 선택. merge_check.py 의 시계 오차 측정용
+        - observed: player_downed        #   상대가 관측한 이벤트
+          who: user_id                   #   거기서 당사자를 가리키는 파라미터
+          who_format: "p{}"              #   그 값을 player_id 로 바꾸는 틀 (기본 "{}")
+          cause: battle_ended            #   당사자 쪽에 남는 원인 이벤트
 
 사용법
 ------
@@ -54,8 +59,8 @@ from db import connect,SCHEMA
 # ---------------------------------------------------------------- 판정 규칙
 #
 # 게임마다 다른 지식이다. 코드에 두지 않고 정의 파일의 merge: 섹션에서 읽는다.
-# 예전에는 여기에 HybridRPG 의 이벤트 이름이 딕셔너리로 박혀 있어서, 다른
-# 게임을 붙이려면 이 파일을 고쳐야 했다.
+# 여기에 이벤트 이름을 딕셔너리로 박아 두면 다른 게임을 붙일 때마다 이
+# 파일을 고쳐야 한다.
 
 class RulesError(Exception):
     """merge: 섹션이 잘못된 경우. 무엇이 왜 틀렸는지 알려준다."""
@@ -95,12 +100,37 @@ class ReasonCorrection:
 
 
 @dataclass(frozen=True)
+class ClockPair:
+    """시계 오차를 재기 위한 왕복 쌍. merge_check.py 만 쓴다.
+
+    한 플레이어에게 일어난 사건(cause)과, 상대가 그것을 관측한 이벤트
+    (observed)를 짝지운다. 양쪽이 서로를 관측한 쌍이 있어야 시계 오차와
+    전달 지연을 나눌 수 있다. who 파라미터의 값을 who_format 에 넣은 것이
+    당사자의 player_id 와 같아야 한다 — user_id 가 2 이고 player_id 가
+    "p2" 인 게임이면 who_format 은 "p{}" 다.
+    """
+    observed: str
+    who: str
+    cause: str
+    who_format: str = "{}"
+
+    def player_of(self, event: dict) -> str | None:
+        value = event["params"].get(self.who)
+        if value is None:
+            return None
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)          # DB 의 숫자는 전부 REAL 이다: 2.0 → 2
+        return self.who_format.format(value)
+
+
+@dataclass(frozen=True)
 class Rules:
     # 파티가 공유하는 상태. 한 명이 일으킨 변화를 전원이 관측한다.
     shared_state: dict[str, EventRule] = field(default_factory=dict)
     # 서버가 전원에게 뿌리는 알림. 각자 기록하면 중복이 생긴다.
     broadcast: dict[str, EventRule] = field(default_factory=dict)
     reason_correction: ReasonCorrection | None = None
+    clock_pairs: tuple[ClockPair, ...] = ()
 
     @property
     def empty(self) -> bool:
@@ -183,7 +213,8 @@ def load_rules(definition: Any) -> Rules:
         return Rules()
     if not isinstance(section, dict):
         raise RulesError("merge 는 shared_state · broadcast · reason_correction 의 모음이어야 한다")
-    _unknown_keys(section, {"shared_state", "broadcast", "reason_correction"}, "merge")
+    _unknown_keys(section, {"shared_state", "broadcast", "reason_correction",
+                            "clock_pairs"}, "merge")
 
     shared = _event_rules(section.get("shared_state"), "merge.shared_state")
     broadcast = _event_rules(section.get("broadcast"), "merge.broadcast")
@@ -209,7 +240,27 @@ def load_rules(definition: Any) -> Rules:
             to_param=str(rc.get("to_param", "to_reason")),
             unknown=str(rc.get("unknown", "unknown")),
         )
-    return Rules(shared, broadcast, correction)
+
+    pairs = []
+    raw_pairs = section.get("clock_pairs") or []
+    if not isinstance(raw_pairs, list):
+        raise RulesError("merge.clock_pairs 는 목록이어야 한다")
+    for i, cp in enumerate(raw_pairs):
+        at = f"merge.clock_pairs[{i}]"
+        if not isinstance(cp, dict):
+            raise RulesError(f"{at} 는 observed · who · cause 를 가진 모음이어야 한다")
+        _unknown_keys(cp, {"observed", "who", "cause", "who_format"}, at)
+        for need in ("observed", "who", "cause"):
+            if not cp.get(need):
+                raise RulesError(f"{at} 에 {need} 가 없다")
+        fmt = str(cp.get("who_format", "{}"))
+        try:
+            fmt.format(0)
+        except (IndexError, KeyError, ValueError):
+            raise RulesError(f"{at}.who_format 은 '{{}}' 가 한 번 들어간 틀이어야 한다: {fmt!r}")
+        pairs.append(ClockPair(str(cp["observed"]), str(cp["who"]), str(cp["cause"]), fmt))
+
+    return Rules(shared, broadcast, correction, tuple(pairs))
 
 
 def load_rules_file(path: str | pathlib.Path) -> Rules:
@@ -257,9 +308,9 @@ def apply_reason_corrections(con, session_id: str,
     """
     보정 이벤트가 가리키는 행에 실제 사유를 붙인다.
 
-    HybridRPG 의 예 — 인벤토리 동기화가 보상 응답보다 먼저 도착하면, 어댑터는
-    그 변동을 "unknown" 으로 기록한 뒤 이중 계상을 막기 위해 보정 이벤트
-    (resource_reason_corrected)만 남긴다. 그 사유를 여기서 되돌려 붙여야
+    예 — 인벤토리 동기화가 보상 응답보다 먼저 도착하면, 게임 쪽 어댑터는
+    그 변동을 "unknown" 으로 기록한 뒤 이중 계상을 막기 위해 보정 이벤트만
+    남긴다. 그 사유를 여기서 되돌려 붙여야
     중복 판정에서 어느 행을 남길지 정할 수 있다.
     """
     if rule is None:

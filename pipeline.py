@@ -24,11 +24,24 @@
 하지 않도록 고쳐야 하는데, 지금 규모(30만 이벤트에 10초)에서는 그만한
 값어치가 없다고 보고 두었다.
 
+게임 폴더
+--------
+게임마다 다른 것은 폴더 하나에 모은다. 이 파일을 포함해 저장소 맨 위의
+파이썬 파일은 어느 게임도 모른다.
+
+    games/<게임>/
+        game.yaml    필수. 지표 정의 + (협동 게임이면) merge 규칙
+        views.sql    선택. 손으로 쓴 게임 전용 뷰
+        cards.py     선택. 손으로 쓴 Metabase 카드
+
+games/example/ 를 복사해서 시작한다.
+
 사용법
 -----
-    python pipeline.py <로그폴더>
-    python pipeline.py <로그폴더> --reset --push
-    python pipeline.py --skip-load            # 로그는 그대로, 뒷단계만 다시
+    python pipeline.py <로그폴더> --game games/mygame
+    python pipeline.py <로그폴더> --game games/mygame --reset --push
+    python pipeline.py --game games/mygame --skip-load    # 로그는 그대로, 뒷단계만 다시
+    python pipeline.py <로그폴더> --yaml mygame.yaml       # 정의 파일 하나만으로
 """
 
 from __future__ import annotations
@@ -76,7 +89,8 @@ def run_step(n: int, total: int, title: str, fn, verbose: bool) -> None:
 
 # ------------------------------------------------------------------ 단계
 
-def do_load(con, log_dir: pathlib.Path, reset: bool, views: pathlib.Path) -> str:
+def do_load(con, log_dir: pathlib.Path, reset: bool, views: pathlib.Path,
+            game_views: pathlib.Path | None) -> str:
     import db
     import loader
     files = sorted(log_dir.glob("*.ndjson"))
@@ -99,8 +113,8 @@ def do_load(con, log_dir: pathlib.Path, reset: bool, views: pathlib.Path) -> str
     con.execute("ANALYZE")
     con.commit()
 
-    if not loader.apply_views(con, views):
-        raise StepFailed(f"{views.name} 적용 실패")
+    if not loader.apply_views(con, views, game_views):
+        raise StepFailed("뷰 적용 실패 — 위 메시지를 보라")
 
     skipped = f", 건너뛴 줄 {totals['errors']}" if totals["errors"] else ""
     return f"파일 {len(files)}개, 이벤트 {totals['events']}건{skipped}"
@@ -114,8 +128,7 @@ def do_merge(con, yaml_path: pathlib.Path) -> str:
     if not yaml_path.exists():
         raise StepFailed(
             f"정의 파일이 없다: {yaml_path}\n"
-            f"  game.example.yaml 을 game.yaml 로 복사해 고치거나, "
-            f"--yaml 로 파일을 지정하라")
+            f"  games/example/ 를 복사해 고친 뒤 --game 으로 그 폴더를 지정하라")
     try:
         rules = merge.load_rules_file(yaml_path)
     except merge.RulesError as e:
@@ -130,12 +143,13 @@ def do_merge(con, yaml_path: pathlib.Path) -> str:
     return f"중복 {n}행 제외 ({kinds}종 이벤트)"
 
 
-def do_viewgen(con, views: pathlib.Path, prefix: str) -> str:
+def do_viewgen(con, game_views: pathlib.Path | None, prefix: str) -> str:
     import loader
     import viewgen
     names = viewgen.event_names(con)
     types = viewgen.param_types(con)
-    skip = viewgen.covered_events(views)
+    # 게임 뷰가 손으로 다루는 이벤트는 건너뛴다. 기본 뷰에는 이벤트 이름이 없다.
+    skip = viewgen.covered_events(game_views) if game_views else set()
     dups = viewgen.dup_events(con)
 
     parts, made, deduped = [], 0, 0
@@ -179,12 +193,14 @@ def do_metrics(con, yaml_path: pathlib.Path) -> str:
     return f"metric_results {written}행"
 
 
-def do_push(db_path: pathlib.Path, yaml_path: pathlib.Path, collection: str) -> str:
+def do_push(db_path: pathlib.Path, yaml_path: pathlib.Path, collection: str,
+            cards: pathlib.Path | None) -> str:
     import metabase_api
-    rc = metabase_api.main([
-        "--db-file", str(db_path), "--push",
-        "--from-yaml", str(yaml_path), "--collection", collection,
-    ])
+    argv = ["--db-file", str(db_path), "--push",
+            "--from-yaml", str(yaml_path), "--collection", collection]
+    if cards is not None:
+        argv += ["--cards", str(cards)]
+    rc = metabase_api.main(argv)
     if rc != 0:
         raise StepFailed("Metabase 반영 실패 — 위 메시지를 보라")
     return "카드 반영 완료"
@@ -197,7 +213,11 @@ def main() -> int:
         description="적재 → 병합 → 뷰 → 지표 (→ Metabase) 를 한 번에 돌린다")
     ap.add_argument("log_dir", nargs="?", help="*.ndjson 이 들어있는 폴더")
     ap.add_argument("--db", default="playtest.sqlite")
-    ap.add_argument("--yaml", default=None, help="지표 정의 (기본: game.yaml)")
+    ap.add_argument("--game", default=None, metavar="폴더",
+                    help="게임 폴더. game.yaml 과 (있으면) views.sql · cards.py 를 "
+                         "여기서 읽는다 (예: games/mygame)")
+    ap.add_argument("--yaml", default=None,
+                    help="정의 파일. --game 의 game.yaml 대신 이것을 쓴다")
     ap.add_argument("--views", default=None, help="기본 뷰 (기본: views.sql)")
     ap.add_argument("--reset", action="store_true",
                     help="기존 내용을 비우고 새로 적재한다 (DB 파일은 유지한다)")
@@ -212,7 +232,27 @@ def main() -> int:
 
     db_path = pathlib.Path(args.db)
     views = pathlib.Path(args.views) if args.views else HERE / "views.sql"
-    yml = pathlib.Path(args.yaml) if args.yaml else HERE / "game.yaml"
+
+    # 게임마다 다른 것은 전부 게임 폴더에서 온다.
+    game_views = cards = None
+    if args.game:
+        game = pathlib.Path(args.game)
+        if not game.is_dir():
+            print(f"[오류] 게임 폴더가 없다: {game}\n"
+                  f"  games/example/ 를 복사해서 시작하라", file=sys.stderr)
+            return 1
+        if (game / "views.sql").exists():
+            game_views = game / "views.sql"
+        if (game / "cards.py").exists():
+            cards = game / "cards.py"
+    if args.yaml:
+        yml = pathlib.Path(args.yaml)
+    elif args.game:
+        yml = pathlib.Path(args.game) / "game.yaml"
+    else:
+        print("[오류] 어느 게임인지 지정하라: --game <게임 폴더> (또는 --yaml <정의 파일>)\n"
+              "  games/example/ 를 복사해서 시작하라", file=sys.stderr)
+        return 1
 
     if not args.skip_load and not args.log_dir:
         print("[오류] 로그 폴더를 지정하라 (또는 --skip-load)", file=sys.stderr)
@@ -235,7 +275,7 @@ def main() -> int:
             n += 1
             run_step(n, total, f"적재 — {args.log_dir} → {db_path}",
                      lambda: do_load(con, pathlib.Path(args.log_dir),
-                                     args.reset, views), args.verbose)
+                                     args.reset, views, game_views), args.verbose)
 
         n += 1
         run_step(n, total, "협동 세션 병합",
@@ -243,7 +283,7 @@ def main() -> int:
 
         n += 1
         run_step(n, total, "이벤트 뷰 생성",
-                 lambda: do_viewgen(con, views, args.prefix), args.verbose)
+                 lambda: do_viewgen(con, game_views, args.prefix), args.verbose)
 
         n += 1
         run_step(n, total, f"지표 계산 — {yml.name}",
@@ -254,7 +294,7 @@ def main() -> int:
         if args.push:
             n += 1
             run_step(n, total, "Metabase 카드 반영",
-                     lambda: do_push(db_path, yml, args.collection), args.verbose)
+                     lambda: do_push(db_path, yml, args.collection, cards), args.verbose)
 
     except StepFailed as e:
         print(f"\n[중단] {e}", file=sys.stderr)

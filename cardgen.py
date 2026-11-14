@@ -6,13 +6,14 @@
 뿐이다. 게임 고유의 뷰(v_battles, v_purchases ...)나 이벤트 이름은 쓰지 않는다.
 
 그래서 새 게임에 붙일 때 이 파일은 손대지 않는다. 필요한 것은 그 게임의
-지표 정의 YAML 하나뿐이다. 손으로 쓴 게임 전용 카드(cards.py)는 선택이다.
+지표 정의 YAML 하나뿐이다. 손으로 쓴 게임 전용 카드는 선택이다.
 
 구성
 ----
-    cardgen.py   (여기) 중립 — 지표 정의 → 카드
-    cards.py     게임 전용 — HybridRPG 의 손으로 쓴 카드 8장
-    views.sql    중립 뷰 + 게임 전용 뷰가 한 파일에 층으로 나뉘어 있다
+    cardgen.py               (여기) 중립 — 지표 정의 → 카드
+    views.sql                중립 — 기본 뷰와 지표 뷰
+    games/<게임>/cards.py    게임 전용 — 손으로 쓴 카드 (선택)
+    games/<게임>/views.sql   게임 전용 — 손으로 쓴 뷰 (선택)
 """
 
 from __future__ import annotations
@@ -29,8 +30,8 @@ NAME_RE = re.compile(r"^\w+$")
 def session_label(col: str = "session_id") -> str:
     """세션 id 를 축에 쓸 짧은 이름으로 바꾸는 SQL 식.
 
-    밑줄 앞부분만 떼어낸다. HybridRPG 의 session_id 가
-    `room9234_20261027` 이라 날짜까지 축에 붙으면 글자가 길어서다.
+    밑줄 앞부분만 떼어낸다. session_id 가 `room9234_20261027` 처럼
+    방 이름 뒤에 날짜가 붙는 꼴이면 축에 붙는 글자가 길어서다.
 
     **밑줄이 없으면 통째로 쓴다.** 이게 없으면 다른 게임에서 조용히 깨진다 —
     `gp-tokyo-01` 같은 id 는 INSTR 이 0 을 돌려주고 SUBSTR(...,1,-1) 이 빈

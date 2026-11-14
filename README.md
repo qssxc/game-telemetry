@@ -15,12 +15,31 @@
 
 새 게임에 붙일 때 **손대지 않는 파일**과 **그 게임을 위해 쓰는 파일**이 갈린다.
 
-| 중립 — 그대로 쓴다 | 게임 전용 — 새로 쓴다 |
+| 중립 — 저장소 맨 위, 그대로 쓴다 | 게임 전용 — `games/<게임>/`, 새로 쓴다 |
 |---|---|
-| `loader.py` `metrics.py` `viewgen.py` | 지표 정의 YAML (`game.yaml`) |
-| `cardgen.py` `metabase_api.py` `merge.py` | 그 YAML 의 `merge:` 섹션 (협동 게임만) |
-| `views.sql` 의 기본 뷰·지표 뷰 층 | `views.sql` 의 게임 전용 뷰 층 |
-| | `cards.py` (손으로 쓴 카드, **선택**) |
+| `loader.py` `merge.py` `viewgen.py` `metrics.py` | **`game.yaml`** — 지표 정의 + (협동이면) `merge:` 규칙. **필수** |
+| `cardgen.py` `metabase_api.py` `pipeline.py` | `views.sql` — 손으로 쓴 뷰. 선택 |
+| `views.sql` (기본 뷰·지표 뷰) | `cards.py` — 손으로 쓴 Metabase 카드. 선택 |
+
+맨 위의 파일에는 이벤트 이름도 파라미터 이름도 없다. 게임마다 다른 것은 전부
+게임 폴더 하나에 들어간다.
+
+```
+games/
+  example/          ← 틀. 복사해서 시작한다
+    game.yaml
+    views.sql
+    cards.py
+  mygame/           ← 자기 게임. .gitignore 가 막아 저장소에 올라가지 않는다
+```
+
+```bash
+cp -r games/example games/mygame        # PowerShell: Copy-Item -Recurse games/example games/mygame
+python pipeline.py <로그폴더> --game games/mygame
+```
+
+`games/` 아래는 `example` 만 올라간다. 자기 게임도 올리려면 `.gitignore` 에
+`!games/mygame/` 줄을 더한다.
 
 > 어떤 이벤트가 협동 세션에서 참가자마다 복제되는지는 게임마다 다르다.
 > 그 지식은 `merge.py` 코드가 아니라 **정의 파일의 `merge:` 섹션**에 적는다
@@ -28,8 +47,8 @@
 > 2인 이상 세션이 있는데 섹션이 없으면 `[경고]` 가 뜬다 — 그대로 두면
 > 공유 자원이 참가자 수만큼 부풀려진 숫자가 오류 없이 나오기 때문이다.
 
-**새 게임을 붙이는 데 필요한 최소한은 지표 정의 YAML 하나다.** 중립 파일만
-가져다 놓고 YAML 을 쓰면 적재부터 Metabase 카드까지 간다. `cards.py` 는 그
+**새 게임을 붙이는 데 필요한 최소한은 `game.yaml` 하나다.** 그것만 쓰면
+적재부터 Metabase 카드까지 간다(`--yaml 파일` 로 폴더 없이도 된다). `cards.py` 는 그
 게임에서만 뜻이 있는 카드("전투 HP 추이" 같은)를 나중에 손으로 더할 때 쓴다.
 
 레이싱 게임 로그(세션 id `gp-tokyo-01`, 이벤트 `lap_completed`)로 확인했다.
@@ -70,17 +89,17 @@ v_monster_killed_all   2건   ← 원본. 병합이 제대로 됐는지 볼 때
 
 계산이 들어간 뷰는 만들지 못한다. 누적 잔액(`v_resource_ledger`), 중복 제거
 (`v_party_ledger`), 두 이벤트를 한 축으로 묶기(`v_damage`) 는 무엇을 보고
-싶은지 사람이 정해야 한다. 그런 뷰는 `views.sql` 에 두면 생성기가 비켜 간다
+싶은지 사람이 정해야 한다. 그런 뷰는 게임 폴더의 `views.sql` 에 두면 생성기가 비켜 간다
 (`WHERE e.name = ...` 을 읽어 해당 이벤트를 건너뛴다).
 
 따로 돌리거나 파일로 받고 싶으면
 
 ```bash
 # 파일로 받기 (views_generated.sql)
-python viewgen.py --db playtest.sqlite --skip-existing views.sql
+python viewgen.py --db playtest.sqlite --skip-existing games/mygame/views.sql
 
 # 파일 없이 DB 에 바로
-python viewgen.py --db playtest.sqlite --skip-existing views.sql --apply --no-file
+python viewgen.py --db playtest.sqlite --skip-existing games/mygame/views.sql --apply --no-file
 ```
 
 `--skip-existing` 을 빼면 손으로 쓴 뷰가 다루는 이벤트까지 만든다. 이름이
@@ -123,26 +142,27 @@ python viewgen.py --db playtest.sqlite --skip-existing views.sql --apply --no-fi
 pip install pyyaml          # 이게 전부다. sqlite3 는 파이썬에 내장되어 있다.
 
 # 한 명령으로 전부
-python pipeline.py <로그폴더> --reset --push
+python pipeline.py <로그폴더> --game games/mygame --reset --push
 ```
 
 단계를 따로 돌리고 싶으면 아래처럼 한다. **순서가 중요하다.**
 
 ```bash
 # 1. 적재 (기본 뷰까지 만든다)
-python loader.py <로그폴더> --db playtest.sqlite --reset
+python loader.py <로그폴더> --db playtest.sqlite --reset --game-views games/mygame/views.sql
 
 # 2. 협동 세션 병합 (1인 세션만 있어도 돌려두면 된다 — 아무것도 바뀌지 않는다)
-python merge.py game.yaml --db playtest.sqlite --show
+python merge.py games/mygame/game.yaml --db playtest.sqlite --show
 
 # 3. 이벤트마다 뷰 생성 — 반드시 2번 뒤에
-python viewgen.py --db playtest.sqlite --skip-existing views.sql --apply --no-file
+python viewgen.py --db playtest.sqlite --skip-existing games/mygame/views.sql --apply --no-file
 
 # 4. 지표 계산
-python metrics.py game.yaml --db playtest.sqlite --show
+python metrics.py games/mygame/game.yaml --db playtest.sqlite --show
 
 # 5. Metabase 카드 생성/갱신 (지표마다 카드 한 장까지 원하면 --from-yaml)
-python metabase_api.py --db-file playtest.sqlite --push --from-yaml game.yaml
+python metabase_api.py --db-file playtest.sqlite --push \
+    --from-yaml games/mygame/game.yaml --cards games/mygame/cards.py
 ```
 
 **3번이 2번 뒤인 것이 중요하다.** 협동 세션에서 참가자마다 복제되는 이벤트를
@@ -192,13 +212,13 @@ $ python pipeline.py testlogs --reset --push
 
 ```bash
 python merge_check.py --db playtest.sqlite                 # 후보 찾기
-python merge_check.py game.yaml --db playtest.sqlite  # 규칙이 다 덮는지 확인
+python merge_check.py games/mygame/game.yaml --db playtest.sqlite  # 규칙이 다 덮는지 확인
 ```
 
-`views.sql` 만 고쳤을 때는 다시 적재할 필요 없이
+뷰만 고쳤을 때는 다시 적재할 필요 없이
 
 ```bash
-python loader.py --views-only --db playtest.sqlite
+python loader.py --views-only --db playtest.sqlite --game-views games/mygame/views.sql
 ```
 
 ### `sqlite3 ... < views.sql` 을 쓰지 않는 이유
@@ -247,7 +267,7 @@ docker run -d -p 3000:3000 \
 연결 후 **동기화**를 돌리면 뷰도 테이블처럼 잡힌다.
 
 카드는 손으로 만들지 않는다. `metabase_api.py --push` 가 `cardgen.py` 로
-정의 파일에서 생성한 카드와 (있으면) `cards.py` 의 게임 전용 카드를 만들고, 다시 돌리면 **지우지 않고 갱신한다** —
+정의 파일에서 생성한 카드와 (`--cards` 로 주면) 게임 폴더 `cards.py` 의 손으로 쓴 카드를 만들고, 다시 돌리면 **지우지 않고 갱신한다** —
 카드 id 가 유지돼야 대시보드에 올려둔 것이 떨어지지 않는다. 사람이 Metabase
 에서 바꾼 차트 모양도 덮어쓰지 않는다. 보내기 전에 로컬 SQLite 로 쿼리를
 먼저 돌려보고, 깨진 것이 하나라도 있으면 아무것도 올리지 않는다.
@@ -274,19 +294,22 @@ docker run -d -p 3000:3000 \
 **Metabase 가 칼럼 종류를 판별할 때 이 선언을 읽는다.** 그래서 전부
 `TEXT` 로 뭉개지 않고 의미에 맞게 선언했다.
 
+## 로그가 지켜야 할 것
+
+게임 쪽에 요구하는 것은 이것뿐이다. 이벤트 이름과 파라미터는 자유다.
+
+- 한 줄에 이벤트 하나인 NDJSON. 줄마다 `session_id` `player_id` `seq` 가 있어야
+  하고(없으면 그 줄을 건너뛴다), `name` `t_ms` `wall_clock` 과 `params` 객체를 읽는다.
+- 참가자마다 파일 하나. 협동 세션이면 참가자들의 `session_id` 가 같아야 한다.
+- 세션 정보는 두 이벤트에서 뽑는다. 이름이 다르면 `sessions` 의 해당 칼럼이 빈다.
+  - `session_started` — `mode` `is_host` `platform` `started_at` `clock_offset_ms`
+  - `session_ended` — `duration_ms` `dropped_count`
+
 ## 정의 파일
 
-`game.yaml` 이 "무엇을 지표로 볼지" 를 정한다. 게임에는 들어가지 않는다.
-저장소에는 틀인 `game.example.yaml` 만 있다 — 복사해서 자기 게임에 맞게 고친다.
-`game.yaml` 은 `.gitignore` 에 있어 올라가지 않는다. 다른 이름을 쓰려면
-`pipeline.py --yaml 이름.yaml` 로 지정한다.
-
-```bash
-cp game.example.yaml game.yaml      # PowerShell: Copy-Item game.example.yaml game.yaml
-```
-
+게임 폴더의 `game.yaml` 이 "무엇을 지표로 볼지" 를 정한다. 게임에는 들어가지 않는다.
 고치고 `metrics.py` 를 다시 돌리면 새 지표가 나온다. **게임을 다시 빌드할
-필요가 없다** — 이게 이 구조의 요점이다.
+필요가 없다** — 이게 이 구조의 요점이다. 틀은 `games/example/game.yaml` 에 있다.
 
 ```yaml
 - name: battle_count
@@ -475,6 +498,17 @@ merge:
 = 오차 + 지연이고, 미지수가 둘인데 식이 하나다.
 
 **양쪽이 서로를 관측한 쌍**이 있으면 풀린다. `merge_check.py` 가 이걸 한다.
+어떤 이벤트가 그 쌍인지는 정의 파일에 적는다.
+
+```yaml
+merge:
+  clock_pairs:
+    - observed: player_downed    # 상대가 관측한 이벤트
+      who: user_id               # 거기서 당사자를 가리키는 파라미터
+      who_format: "p{}"          # 그 값을 player_id 로 바꾸는 틀 (기본 "{}")
+      cause: battle_ended        # 당사자 쪽에 남는 원인 이벤트
+```
+
 실측 예:
 
 ```
@@ -518,9 +552,6 @@ Steam 기반 게임이라면 SteamID 를 해시해서 쓰면 되고, 지금 구�
 ## 아직 안 된 것
 
 - **영속 플레이어 식별자** — 위 제약 참조. 세션 간 비교가 필요해지면 먼저 해결해야 한다.
-- **`views.sql` 의 게임 전용 층 분리** — 이벤트별 뷰는 `viewgen.py` 가 만들지만,
-  손으로 쓴 게임 전용 뷰(`v_battles` 등)가 같은 파일에 있어 다른 게임에도 딸려간다.
-  빈 뷰가 생길 뿐 해는 없지만, 중립 층과 갈라두는 편이 맞다.
 - **시계 보정 적용** — `clock_offset_ms` 는 여전히 0 으로 기록된다.
   측정값(위 +167ms)을 `JoinSession` 의 `hostOffsetMs` 에 넣으면 `t_ms` 가 정렬된다.
 - **행 단위 계산식** — `player_hp / player_max_hp` 처럼 같은 행의 두 파라미터를

@@ -14,11 +14,13 @@ Metabase 의 공식 내장 드라이버다. DuckDB 는 커뮤니티 드라이버
 테이블이면 이벤트 종류를 추가할 때마다 스키마를 바꿔야 하고, 그러면
 "수집을 늘려도 도구는 그대로" 라는 전제가 깨진다.
 
-조회 편의는 뷰로 해결한다(views.sql).
+조회 편의는 뷰로 해결한다. 어느 게임에나 있는 기본 뷰는 views.sql 에,
+그 게임에서만 뜻이 있는 뷰는 games/<게임>/views.sql 에 둔다(--game-views).
 
 사용법
 ------
     python loader.py <로그 폴더> [--db playtest.sqlite] [--reset]
+                     [--game-views games/<게임>/views.sql]
 
 적재는 전체가 하나의 트랜잭션이다. Metabase 가 같은 파일을 열어둔 채로
 돌려도 중간 상태가 보이지 않고, 실패하면 직전 데이터가 온전히 남는다.
@@ -246,9 +248,14 @@ def load_file(con: sqlite3.Connection, path: pathlib.Path) -> dict[str, Any]:
     return {"events": len(event_rows), "errors": error_count, "lines": line_count}
 
 
-def apply_views(con: sqlite3.Connection, views_path: pathlib.Path) -> bool:
+def apply_views(con: sqlite3.Connection, views_path: pathlib.Path,
+                game_views: pathlib.Path | None = None) -> bool:
     """
-    views.sql 을 적용한다.
+    기본 뷰(views.sql)와, 주어지면 게임 전용 뷰를 적용한다.
+
+    둘을 한 트랜잭션으로 묶는다. 게임 뷰는 기본 뷰(event_params_merged)를
+    참조하므로 기본 뷰가 먼저다. 게임 뷰 파일이 지정됐는데 없으면 실패한다 —
+    조용히 넘어가면 그 뷰를 쓰는 카드가 옛 정의로 계속 돌아간다.
 
     sqlite3 명령줄 도구를 거치지 않는 이유: PowerShell 은 `<` 리다이렉션을
     지원하지 않고(예약어로 잡아두고 구현하지 않았다), `Get-Content | sqlite3`
@@ -259,7 +266,13 @@ def apply_views(con: sqlite3.Connection, views_path: pathlib.Path) -> bool:
     if not views_path.exists():
         print(f"  [건너뜀] {views_path.name} 이 없다 — 뷰 없이 진행한다")
         return False
-    return run_atomically(con, views_path.read_text(encoding="utf-8"), "뷰 적용")
+    sql = views_path.read_text(encoding="utf-8")
+    if game_views is not None:
+        if not game_views.exists():
+            print(f"  [오류] 게임 뷰 파일이 없다: {game_views}", file=sys.stderr)
+            return False
+        sql += "\n\n" + game_views.read_text(encoding="utf-8")
+    return run_atomically(con, sql, "뷰 적용")
 
 
 def main() -> int:
@@ -271,6 +284,9 @@ def main() -> int:
                     help="기존 내용을 비우고 새로 적재한다 (DB 파일은 유지한다)")
     ap.add_argument("--views", default=None,
                     help="적용할 뷰 스크립트 (기본: 이 스크립트 옆의 views.sql)")
+    ap.add_argument("--game-views", default=None, metavar="VIEWS.SQL",
+                    help="기본 뷰 뒤에 이어서 적용할 게임 전용 뷰 "
+                         "(예: games/mygame/views.sql)")
     ap.add_argument("--no-views", action="store_true", help="뷰를 적용하지 않는다")
     ap.add_argument("--views-only", action="store_true",
                     help="적재 없이 뷰만 다시 적용한다")
@@ -279,6 +295,7 @@ def main() -> int:
     db_path = pathlib.Path(args.db)
     views_path = pathlib.Path(args.views) if args.views \
         else pathlib.Path(__file__).parent / "views.sql"
+    game_views = pathlib.Path(args.game_views) if args.game_views else None
 
     # ----------------------------------------------------- 뷰만 다시 적용
     if args.views_only:
@@ -287,7 +304,7 @@ def main() -> int:
             return 1
         con = connect(str(db_path))
         print(f"뷰 적용 — {views_path.name} → {db_path}")
-        ok = apply_views(con, views_path)
+        ok = apply_views(con, views_path, game_views)
         con.close()
         print("완료" if ok else "실패")
         return 0 if ok else 1
@@ -337,7 +354,9 @@ def main() -> int:
     # 반드시 다시 만들어야 한다. 그래서 여기서 자동으로 적용한다.
     if not args.no_views:
         print(f"뷰 적용 중... ({views_path.name})")
-        apply_views(con, views_path)
+        if not apply_views(con, views_path, game_views):
+            con.close()
+            return 1
 
     con.close()
 

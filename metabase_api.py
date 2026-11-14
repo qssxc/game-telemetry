@@ -373,7 +373,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="이 SQLite 파일이 등록돼 있는지 확인한다")
     ap.add_argument("--push", action="store_true",
                     help="카드를 Metabase 에 생성/갱신한다 "
-                         "(cards.py 의 게임 전용 카드 + --from-yaml 로 생성한 카드)")
+                         "(--from-yaml 로 생성한 카드 + --cards 의 손으로 쓴 카드)")
+    ap.add_argument("--cards", default=None, metavar="CARDS.PY",
+                    help="손으로 쓴 게임 전용 카드 파일 (예: games/mygame/cards.py)")
     ap.add_argument("--collection", default="플레이테스트 지표",
                     help="카드를 담을 컬렉션 이름")
     ap.add_argument("--dry-run", action="store_true",
@@ -451,14 +453,26 @@ def main(argv: list[str] | None = None) -> int:
 
     # 게임 전용 카드는 선택이다. 새 게임은 지표 정의 YAML 만으로 시작할 수
     # 있어야 하고, 그 게임을 위한 손수 쓴 카드는 나중 일이다.
-    try:
-        import cards
-        todo.update({n: (s, cards.DISPLAY.get(n, "table"))
-                     for n, s in cards.CARDS.items()})
-        sample_params = dict(getattr(cards, "SAMPLE_PARAMS", {}))
-        print(f"\ncards.py — 게임 전용 카드 {len(todo)}개")
-    except ImportError:
-        print("\ncards.py 없음 — 지표 정의에서 생성한 카드만 올린다")
+    #
+    # 예전에는 옆에 cards.py 가 있으면 무조건 import 했다. 그러면 다른 게임을
+    # 돌릴 때도 앞 게임의 카드가 같이 올라간다. 이제는 경로로 받은 것만 읽는다.
+    if args.cards:
+        import runpy
+        if not os.path.exists(args.cards):
+            print(f"\n[실패] 카드 파일이 없다: {args.cards}", file=sys.stderr)
+            return 1
+        try:
+            mod = runpy.run_path(args.cards, run_name="game_cards")
+        except Exception as e:
+            print(f"\n[실패] {args.cards} 를 읽지 못했다: {e}", file=sys.stderr)
+            return 1
+        display = mod.get("DISPLAY", {})
+        todo.update({n: (s, display.get(n, "table"))
+                     for n, s in (mod.get("CARDS") or {}).items()})
+        sample_params = dict(mod.get("SAMPLE_PARAMS", {}))
+        print(f"\n{args.cards} — 게임 전용 카드 {len(todo)}개")
+    else:
+        print("\n--cards 없음 — 지표 정의에서 생성한 카드만 올린다")
 
     if args.from_yaml:
         gen = cardgen.from_metrics(args.from_yaml)
@@ -467,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not todo:
         print("\n[실패] 올릴 카드가 없다. --from-yaml 로 지표 정의를 주거나 "
-              "cards.py 를 두어라.", file=sys.stderr)
+              "--cards 로 카드 파일을 주어라.", file=sys.stderr)
         return 1
 
     # 보내기 전에 로컬 SQLite 로 쿼리를 돌려본다.

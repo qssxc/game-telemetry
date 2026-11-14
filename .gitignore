@@ -11,9 +11,10 @@ __pycache__/
 # Metabase 실행 파일·내부 DB
 metabase/
 
-# 게임 정의 파일 — 게임마다 따로 갖는다. 틀은 game.example.yaml
-game.yaml
-hybridrpg.yaml
+# 게임 폴더 — 게임마다 따로 갖는다. 틀(games/example)만 올린다.
+# 자기 게임도 올리려면 아래에 `!games/<게임>/` 줄을 더한다.
+games/*
+!games/example/
 
 # 비밀 정보
 .env
