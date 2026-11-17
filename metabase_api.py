@@ -59,6 +59,7 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import sys
 import urllib.error
 import urllib.parse
@@ -262,6 +263,7 @@ class Metabase:
         visualization_settings: dict[str, Any] | None = None,
         description: str | None = None,
         preserve_visuals: bool = True,
+        choices: dict[str, list[str]] | None = None,
     ) -> tuple[dict[str, Any], str]:
         """같은 이름의 카드가 있으면 갱신하고, 없으면 만든다.
 
@@ -281,7 +283,7 @@ class Metabase:
 
         body = {
             "name": name,
-            "dataset_query": build_native_query(sql, database_id, name),
+            "dataset_query": build_native_query(sql, database_id, name, choices),
             "display": display,
             "visualization_settings": visualization_settings or {},
             "collection_id": collection_id,
@@ -307,7 +309,8 @@ TAG_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 OPTIONAL_RE = re.compile(r"\[\[(.*?)\]\]", re.S)
 
 
-def build_template_tags(sql: str, card_name: str) -> dict[str, Any]:
+def build_template_tags(sql: str, card_name: str,
+                        choices: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """SQL 안의 {{변수}} 를 찾아 Metabase 가 요구하는 선언을 만든다.
 
     Metabase 는 쿼리에 {{x}} 를 쓰면 template-tags 에 x 의 선언이 있어야
@@ -317,6 +320,11 @@ def build_template_tags(sql: str, card_name: str) -> dict[str, Any]:
     필수/선택 판정 — [[...]] 안에서만 쓰인 변수는 선택이다. Metabase 는
     값이 비면 그 블록을 통째로 지운다. 블록 밖에 있는 변수는 값이 없으면
     쿼리 자체가 성립하지 않으므로 필수다.
+
+    choices — 변수마다 고를 수 있는 값 목록. 주면 Metabase 가 자유 입력
+    칸 대신 드롭다운으로 그린다. 네이티브 SQL 변수는 칼럼과 묶여 있지
+    않아서, 목록을 같이 주지 않으면 Metabase 는 무슨 값이 있는지 알 길이
+    없다. 그래서 빈 칸만 나온다.
     """
     inside = set()
     for block in OPTIONAL_RE.findall(sql):
@@ -325,7 +333,7 @@ def build_template_tags(sql: str, card_name: str) -> dict[str, Any]:
 
     tags: dict[str, Any] = {}
     for var in sorted(inside | outside):
-        tags[var] = {
+        tag = {
             # id 를 난수로 만들면 돌릴 때마다 카드가 "바뀐 것"이 된다.
             # 카드 이름과 변수 이름으로 고정해, 같은 입력이면 같은 선언이 나오게 한다.
             "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{card_name}/{var}")),
@@ -334,17 +342,81 @@ def build_template_tags(sql: str, card_name: str) -> dict[str, Any]:
             "type": "text",
             "required": var in outside,
         }
+        values = (choices or {}).get(var)
+        if values:
+            # 세 개가 다 있어야 한다. values_query_type 이 위젯 모양("목록"
+            # 이냐 "검색창"이냐 "입력칸"이냐)이고, 나머지 둘이 그 목록의
+            # 내용이다. 모양만 주면 빈 드롭다운이 되어 입력칸처럼 보인다.
+            tag["values_query_type"] = "list"
+            tag["values_source_type"] = "static-list"
+            tag["values_source_config"] = {"values": values}
+        tags[var] = tag
     return tags
 
 
-def build_native_query(sql: str, database_id: int, card_name: str) -> dict[str, Any]:
+def build_native_query(sql: str, database_id: int, card_name: str,
+                       choices: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """네이티브 SQL 카드의 dataset_query 를 만든다."""
     return {
         "type": "native",
         "database": database_id,
         "native": {"query": sql.strip(),
-                   "template-tags": build_template_tags(sql, card_name)},
+                   "template-tags": build_template_tags(sql, card_name, choices)},
     }
+
+
+def collect_choices(db_path: str, names: list[str],
+                    limit: int = 300) -> dict[str, list[str]]:
+    """변수 이름과 같은 칼럼이 DB 에 있으면 그 값 목록을 가져온다.
+
+    게임을 모른다. 이벤트 이름도, 칼럼 이름도 읽지 않는다. 변수 이름을
+    들고 sqlite_master 를 훑어서 같은 이름의 칼럼을 가진 테이블/뷰를
+    찾을 뿐이다. 다른 게임에 그대로 쓰면 그 게임의 변수에 대해 똑같이
+    동작한다.
+
+    뷰보다 실제 테이블을 먼저 본다 — 뷰는 테이블에서 파생되므로 값의
+    부분집합이고, 필터가 걸린 뷰를 집으면 고를 수 있는 값이 좁아진다.
+
+    limit 을 넘으면 목록을 주지 않는다. 값이 수천 개면 드롭다운이 오히려
+    불편하고, Metabase 가 카드마다 그 목록을 통째로 들고 있게 된다.
+    """
+    choices: dict[str, list[str]] = {}
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        objs = con.execute(
+            "SELECT name, type FROM sqlite_master "
+            "WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        cols: dict[str, list[tuple[str, str]]] = {}
+        for name, kind in objs:
+            try:
+                for row in con.execute(f'PRAGMA table_info("{name}")'):
+                    cols.setdefault(row[1], []).append((name, kind))
+            except sqlite3.Error:
+                continue
+
+        for var in names:
+            where = cols.get(var)
+            if not where:
+                continue
+            tables = [n for n, k in where if k == "table"] or [n for n, _ in where]
+            values: set[str] = set()
+            for obj in tables:
+                try:
+                    values |= {
+                        str(r[0]) for r in con.execute(
+                            f'SELECT DISTINCT "{var}" FROM "{obj}" '
+                            f'WHERE "{var}" IS NOT NULL LIMIT ?', (limit + 1,))
+                    }
+                except sqlite3.Error:
+                    continue
+                if len(values) > limit:
+                    break
+            if values and len(values) <= limit:
+                choices[var] = sorted(values)
+    finally:
+        con.close()
+    return choices
 
 
 # ---------------------------------------------------------------- CLI
@@ -373,16 +445,17 @@ def main(argv: list[str] | None = None) -> int:
                     help="이 SQLite 파일이 등록돼 있는지 확인한다")
     ap.add_argument("--push", action="store_true",
                     help="카드를 Metabase 에 생성/갱신한다 "
-                         "(--from-yaml 로 생성한 카드 + --cards 의 손으로 쓴 카드)")
-    ap.add_argument("--cards", default=None, metavar="CARDS.PY",
-                    help="손으로 쓴 게임 전용 카드 파일 (예: games/mygame/cards.py)")
+                         "(cards.py 의 게임 전용 카드 + --from-yaml 로 생성한 카드)")
+    ap.add_argument("--cards", default="cards",
+                    help="게임 전용 카드를 담은 모듈 이름 (기본: cards). "
+                         "발표용은 cards_presentation")
     ap.add_argument("--collection", default="플레이테스트 지표",
                     help="카드를 담을 컬렉션 이름")
     ap.add_argument("--dry-run", action="store_true",
                     help="보내지 않고 무엇이 바뀔지만 보여준다")
     ap.add_argument("--from-yaml", default=None,
                     help="지표 정의 YAML 에서 지표마다 카드를 만든다 "
-                         "(예: game.yaml)")
+                         "(예: hybridrpg.yaml)")
     args = ap.parse_args(argv)
 
     url = args.url or os.environ.get("METABASE_URL", "http://localhost:3000")
@@ -453,26 +526,15 @@ def main(argv: list[str] | None = None) -> int:
 
     # 게임 전용 카드는 선택이다. 새 게임은 지표 정의 YAML 만으로 시작할 수
     # 있어야 하고, 그 게임을 위한 손수 쓴 카드는 나중 일이다.
-    #
-    # 예전에는 옆에 cards.py 가 있으면 무조건 import 했다. 그러면 다른 게임을
-    # 돌릴 때도 앞 게임의 카드가 같이 올라간다. 이제는 경로로 받은 것만 읽는다.
-    if args.cards:
-        import runpy
-        if not os.path.exists(args.cards):
-            print(f"\n[실패] 카드 파일이 없다: {args.cards}", file=sys.stderr)
-            return 1
-        try:
-            mod = runpy.run_path(args.cards, run_name="game_cards")
-        except Exception as e:
-            print(f"\n[실패] {args.cards} 를 읽지 못했다: {e}", file=sys.stderr)
-            return 1
-        display = mod.get("DISPLAY", {})
-        todo.update({n: (s, display.get(n, "table"))
-                     for n, s in (mod.get("CARDS") or {}).items()})
-        sample_params = dict(mod.get("SAMPLE_PARAMS", {}))
-        print(f"\n{args.cards} — 게임 전용 카드 {len(todo)}개")
-    else:
-        print("\n--cards 없음 — 지표 정의에서 생성한 카드만 올린다")
+    try:
+        import importlib
+        cards = importlib.import_module(args.cards)
+        todo.update({n: (s, cards.DISPLAY.get(n, "table"))
+                     for n, s in cards.CARDS.items()})
+        sample_params = dict(getattr(cards, "SAMPLE_PARAMS", {}))
+        print(f"\n{args.cards}.py — 손으로 쓴 카드 {len(todo)}개")
+    except ImportError:
+        print(f"\n{args.cards}.py 없음 — 지표 정의에서 생성한 카드만 올린다")
 
     if args.from_yaml:
         gen = cardgen.from_metrics(args.from_yaml)
@@ -481,7 +543,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not todo:
         print("\n[실패] 올릴 카드가 없다. --from-yaml 로 지표 정의를 주거나 "
-              "--cards 로 카드 파일을 주어라.", file=sys.stderr)
+              "cards.py 를 두어라.", file=sys.stderr)
         return 1
 
     # 보내기 전에 로컬 SQLite 로 쿼리를 돌려본다.
@@ -516,6 +578,19 @@ def main(argv: list[str] | None = None) -> int:
     if local:
         print(f"  {len(checked)}개 모두 통과")
 
+    # 필터 값 목록 — 변수와 같은 이름의 칼럼이 DB 에 있으면 그 값을 가져다
+    # 드롭다운으로 만든다. 없으면 지금까지대로 자유 입력 칸이 된다.
+    choices: dict[str, list[str]] = {}
+    if local:
+        wanted = sorted({v for sql, _ in checked.values()
+                         for v in TAG_RE.findall(sql)})
+        if wanted:
+            choices = collect_choices(local, wanted)
+            for var in wanted:
+                got = choices.get(var)
+                print(f"  필터 {var}: "
+                      + (f"값 {len(got)}개" if got else "값 목록 없음 — 자유 입력"))
+
     col = mb.ensure_collection(args.collection)
     print(f"\n컬렉션   {col['name']} (id={col['id']})")
 
@@ -528,7 +603,8 @@ def main(argv: list[str] | None = None) -> int:
     made = {"created": 0, "updated": 0}
     for name, (sql, display) in checked.items():
         try:
-            card, how = mb.upsert_card(name, sql, db["id"], col["id"], display=display)
+            card, how = mb.upsert_card(name, sql, db["id"], col["id"],
+                                       display=display, choices=choices)
             made[how] += 1
             print(f"  {'생성' if how == 'created' else '갱신'}  "
                   f"{name}   (card id={card['id']})")
