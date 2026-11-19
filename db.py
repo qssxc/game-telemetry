@@ -1,4 +1,5 @@
 import sqlite3
+import sys
 
 def connect(db_path: str, fast: bool = False, readonly=False):
     if readonly:
@@ -115,3 +116,27 @@ CREATE INDEX IF NOT EXISTS ix_events_name
 # 의존 순서의 역순으로 적는다.
 OUR_TABLES = ("load_log", "metric_results", "merge_overrides",
               "event_params", "events", "sessions")
+
+
+def run_atomically(con: sqlite3.Connection, sql: str, label: str) -> bool:
+    """
+    여러 문장을 한 트랜잭션으로 실행한다.
+
+    묶는 이유 — SQLite 는 DDL 도 트랜잭션에 들어간다. DROP VIEW 와
+    CREATE VIEW 사이의 빈 구간을 다른 연결(대표적으로 Metabase)이 보면
+    `no such table: v_coin_ledger` 로 카드가 깨진다. 한 트랜잭션에 넣으면
+    읽는 쪽은 옛 뷰 아니면 새 뷰만 보고 중간 상태를 보지 못한다.
+
+    executescript 은 호출 직전에 열려 있던 트랜잭션을 커밋한 뒤 본문을
+    그대로 SQLite 에 넘긴다. 그래서 BEGIN/COMMIT 을 본문에 써야 묶인다.
+    """
+    try:
+        con.executescript("BEGIN IMMEDIATE;\n" + sql + "\nCOMMIT;")
+        return True
+    except sqlite3.Error as e:
+        try:
+            con.executescript("ROLLBACK;")
+        except sqlite3.Error:
+            pass                       # 이미 롤백된 경우
+        print(f"  [오류] {label} 실패: {e}", file=sys.stderr)
+        return False

@@ -24,9 +24,9 @@ INTEGER 로 자르면 안 되고, turn_count 는 잘라야 읽기 좋다. 데이
 
 무엇을 못 하는가
 --------------
-계산이 들어간 뷰는 못 만든다. 누적 잔액(v_resource_ledger), 중복 제거
-(v_party_ledger), 두 이벤트를 한 축으로 묶기(v_damage) 같은 것은 사람이
-무엇을 보고 싶은지 정해야 나온다. 그런 뷰는 games/<게임>/views.sql 에
+계산이 들어간 뷰는 못 만든다. 누적 잔액(예: games/example 의 v_coin_ledger),
+두 이벤트를 한 축으로 묶기 같은 것은 사람이 무엇을 보고 싶은지 정해야
+나온다. 그런 뷰는 games/<게임>/views.sql 에
 손으로 쓰고, 여기서는 --skip-existing 으로 건너뛴다.
 
 merge.py 뒤에 돌려야 한다
@@ -59,7 +59,8 @@ import pathlib
 import re
 import sqlite3
 import sys
-from typing import Any
+
+from db import connect, run_atomically
 
 # events 테이블이 이미 들고 있는 칼럼. 파라미터 이름이 이것과 겹치면
 # 칼럼 이름이 충돌하므로 접미사를 붙인다.
@@ -205,7 +206,7 @@ def build_view(event: str, params: list[tuple[str, str]], prefix: str,
         + f"DROP VIEW IF EXISTS {view};\n"
         f"CREATE VIEW {view} AS\n"
         f"{note}SELECT\n" + ",\n".join(cols) + "\n"
-        f"FROM events e\n"
+        "FROM events e\n"
         + ("".join(j + "\n" for j in joins))
         + where
     )
@@ -227,6 +228,37 @@ def covered_events(path: pathlib.Path) -> set[str]:
     return found
 
 
+def generate(con: sqlite3.Connection, skip: set[str],
+             prefix: str = "v_") -> tuple[list[str], list[tuple[str, int, bool]]]:
+    """DB 를 읽어 이벤트별 뷰의 SQL 을 만든다.
+
+    돌려주는 것: (뷰마다 SQL 조각, [(뷰 이름, 파라미터 수, 중복 제거 여부)])
+    skip 에 든 이벤트는 건너뛴다 — 손으로 쓴 뷰가 이미 다루는 이벤트다.
+    중복 복제가 확인된 이벤트는 걸러진 뷰와 _all 뷰 둘을 만든다.
+
+    viewgen.py 와 pipeline.py 가 같이 쓴다.
+    """
+    names = event_names(con)
+    types = param_types(con)
+    dups = dup_events(con)
+
+    parts: list[str] = []
+    made: list[tuple[str, int, bool]] = []
+    for name in names:
+        if name in skip:
+            continue
+        params = types.get(name, [])
+        dedup = name in dups
+        parts.append(build_view(name, params, prefix, dedup=dedup))
+        made.append((f"{prefix}{name}", len(params), dedup))
+        if dedup:
+            # 원본은 지우지 않는다. 걸러지기 전을 볼 수 있어야 병합이
+            # 제대로 됐는지 확인할 수 있다.
+            parts.append(build_view(name, params, prefix, suffix="_all"))
+            made.append((f"{prefix}{name}_all", len(params), False))
+    return parts, made
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="이벤트마다 조회용 뷰를 만들어 낸다")
@@ -246,45 +278,32 @@ def main() -> int:
         print(f"[오류] DB 가 없다: {db}", file=sys.stderr)
         return 1
 
-    con = sqlite3.connect(str(db))
-    try:
-        names = event_names(con)
-        types = param_types(con)
-    except sqlite3.Error as e:
-        print(f"[오류] DB 를 읽지 못했다: {e}\n"
-              f"  event_params_merged 뷰가 필요하다. loader.py 를 먼저 돌려라.",
-              file=sys.stderr)
-        return 1
-
     skip = covered_events(pathlib.Path(args.skip_existing)) if args.skip_existing else set()
     if skip:
         print(f"손으로 쓴 뷰가 다루는 이벤트 {len(skip)}개는 건너뛴다: "
               f"{', '.join(sorted(skip))}")
 
-    dups = dup_events(con)
-    if dups:
-        print(f"중복 복제가 확인된 이벤트 {len(dups)}개는 canonical = 1 만 본다: "
-              f"{', '.join(sorted(dups))}")
+    con = connect(str(db))
+    try:
+        parts, made = generate(con, skip, args.prefix)
+    except sqlite3.Error as e:
+        print(f"[오류] DB 를 읽지 못했다: {e}\n"
+              f"  event_params_merged 뷰가 필요하다. loader.py 를 먼저 돌려라.",
+              file=sys.stderr)
+        con.close()
+        return 1
+
+    deduped = sorted(n[len(args.prefix):] for n, _, d in made if d)
+    if deduped:
+        print(f"중복 복제가 확인된 이벤트 {len(deduped)}개는 canonical = 1 만 본다: "
+              f"{', '.join(deduped)}")
     else:
         print("중복 복제된 행이 없다 — 필터 없이 만든다. "
               "(협동 세션을 적재하고 merge.py 를 돌린 뒤 다시 생성하면 필터가 붙는다)")
 
-    parts, made = [], []
-    for name in names:
-        if name in skip:
-            continue
-        params = types.get(name, [])
-        dedup = name in dups
-        parts.append(build_view(name, params, args.prefix, dedup=dedup))
-        made.append((f"{args.prefix}{name}", len(params), dedup))
-        if dedup:
-            # 원본은 지우지 않는다. 걸러지기 전을 볼 수 있어야 병합이
-            # 제대로 됐는지 확인할 수 있다.
-            parts.append(build_view(name, params, args.prefix, suffix="_all"))
-            made.append((f"{args.prefix}{name}_all", len(params), False))
-
     if not made:
         print("[오류] 만들 뷰가 없다. 로그를 적재했는지 확인하라.", file=sys.stderr)
+        con.close()
         return 1
 
     header = (
@@ -302,16 +321,10 @@ def main() -> int:
         print(f"\n{args.out} — 뷰 {len(made)}개")
 
     if args.apply:
-        try:
-            # 한 트랜잭션으로 묶는다. DROP 과 CREATE 사이를 읽는 쪽(Metabase)이
-            # 보면 `no such table` 로 카드가 깨진다.
-            con.executescript("BEGIN IMMEDIATE;\n" + sql + "\nCOMMIT;")
-        except sqlite3.Error as e:
-            try:
-                con.executescript("ROLLBACK;")
-            except sqlite3.Error:
-                pass
-            print(f"[오류] 뷰 적용 실패: {e}", file=sys.stderr)
+        # 한 트랜잭션으로 묶는다. DROP 과 CREATE 사이를 읽는 쪽(Metabase)이
+        # 보면 `no such table` 로 카드가 깨진다.
+        if not run_atomically(con, sql, "뷰 적용"):
+            con.close()
             return 1
         print(f"{db} 에 적용 완료")
 

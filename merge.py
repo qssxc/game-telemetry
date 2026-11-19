@@ -46,7 +46,6 @@ canonical = 1 만 보면 되고, 클라이언트별 분석은 전부 보면 된�
 from __future__ import annotations
 
 import argparse
-import difflib
 import pathlib
 import sqlite3
 import sys
@@ -54,7 +53,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
-from db import connect,SCHEMA
+from db import SCHEMA, connect
+from metrics import describe_unknown
 
 # ---------------------------------------------------------------- 판정 규칙
 #
@@ -151,15 +151,9 @@ class Rules:
 def _unknown_keys(got: dict, known: set[str], where: str) -> None:
     """모르는 키가 오면 멈춘다. metrics.py 와 같은 이유다 — `brodcast:` 같은
     오타를 조용히 무시하면 중복 제거가 빠진 숫자가 오류 없이 대시보드에 뜬다."""
-    unknown = set(got) - known
-    if not unknown:
-        return
-    hints = []
-    for k in sorted(map(str, unknown)):
-        near = difflib.get_close_matches(k, known, n=1, cutoff=0.6)
-        hints.append(f"{k!r}" + (f" (혹시 {near[0]!r}?)" if near else ""))
-    raise RulesError(f"{where} 에 모르는 키: {', '.join(hints)}\n"
-                     f"  쓸 수 있는 키: {', '.join(sorted(known))}")
+    problem = describe_unknown(got, known)
+    if problem:
+        raise RulesError(f"{where} 에 모르는 키: {problem}")
 
 
 def _str_list(value: Any, where: str) -> tuple[str, ...]:
@@ -268,17 +262,11 @@ def load_rules_file(path: str | pathlib.Path) -> Rules:
     return load_rules(yaml.safe_load(pathlib.Path(path).read_text(encoding="utf-8")))
 
 
-def ensure_columns(con: sqlite3.Connection) -> None:
-    """예전 DB 에도 판정 칼럼을 붙인다."""
-    cols = {r[1] for r in con.execute("PRAGMA table_info(events)")}
-    if "canonical" not in cols:
-        con.execute("ALTER TABLE events ADD COLUMN canonical INTEGER NOT NULL DEFAULT 1")
-    if "dup_group" not in cols:
-        con.execute("ALTER TABLE events ADD COLUMN dup_group TEXT")
-
-
 def load_events(con: sqlite3.Connection, session_id: str) -> dict[str, list[dict]]:
-    """세션의 모든 플레이어 이벤트를 파라미터까지 붙여 읽는다."""
+    """세션의 모든 플레이어 이벤트를 파라미터까지 붙여 읽는다. 플레이어별 목록.
+
+    merge_check.py 도 이걸 쓴다. wall 은 DB 에 든 문자열 그대로다.
+    """
     params: dict[tuple, dict[str, Any]] = defaultdict(dict)
     for pid, seq, key, num, text, flag in con.execute(
         "SELECT player_id, seq, key, num_value, text_value, bool_value"
@@ -439,7 +427,6 @@ def dedup_session(con, session_id: str, ev_by_player: dict[str, list[dict]],
 def merge(con: sqlite3.Connection, rules: Rules | None = None) -> int:
     rules = rules or Rules()
     con.executescript(SCHEMA)
-    ensure_columns(con)
 
     # 다시 돌려도 같은 결과가 나오도록 판정을 초기화한다.
     con.execute("UPDATE events SET canonical = 1, dup_group = NULL")
@@ -515,7 +502,6 @@ def main() -> int:
             return 1
 
     con = connect(args.db)
-    con.execute("PRAGMA journal_mode = WAL")
     rc = merge(con, rules)
 
     if args.show:

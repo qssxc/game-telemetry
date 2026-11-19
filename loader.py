@@ -44,7 +44,7 @@ from typing import Any, Iterator
 
 # 스키마·인덱스·연결은 db.py 한 곳에만 둔다. 여기에 복사본이 있었을 때
 # metric_results 가 한쪽에만 생겨, --reset 뒤에 지표 뷰가 깨졌다.
-from db import INDEXES, OUR_TABLES, SCHEMA, connect
+from db import INDEXES, OUR_TABLES, SCHEMA, connect, run_atomically
 
 # 이벤트 봉투(envelope)에 해당하는 키. 이 외의 키는 모두 파라미터로 본다.
 ENVELOPE_KEYS = {
@@ -55,30 +55,6 @@ ENVELOPE_KEYS = {
 
 # REAL(IEEE 754 배정밀도)이 정수를 빠짐없이 표현하는 한계.
 MAX_EXACT_INT = 2 ** 53
-
-
-def run_atomically(con: sqlite3.Connection, sql: str, label: str) -> bool:
-    """
-    여러 문장을 한 트랜잭션으로 실행한다.
-
-    묶는 이유 — SQLite 는 DDL 도 트랜잭션에 들어간다. DROP VIEW 와
-    CREATE VIEW 사이의 빈 구간을 다른 연결(대표적으로 Metabase)이 보면
-    `no such table: v_purchases` 로 카드가 깨진다. 한 트랜잭션에 넣으면
-    읽는 쪽은 옛 뷰 아니면 새 뷰만 보고 중간 상태를 보지 못한다.
-
-    executescript 은 호출 직전에 열려 있던 트랜잭션을 커밋한 뒤 본문을
-    그대로 SQLite 에 넘긴다. 그래서 BEGIN/COMMIT 을 본문에 써야 묶인다.
-    """
-    try:
-        con.executescript("BEGIN IMMEDIATE;\n" + sql + "\nCOMMIT;")
-        return True
-    except sqlite3.Error as e:
-        try:
-            con.executescript("ROLLBACK;")
-        except sqlite3.Error:
-            pass                       # 이미 롤백된 경우
-        print(f"  [오류] {label} 실패: {e}", file=sys.stderr)
-        return False
 
 
 def begin_load(con: sqlite3.Connection, reset: bool) -> None:
@@ -99,7 +75,7 @@ def begin_load(con: sqlite3.Connection, reset: bool) -> None:
     --reset 이 제 역할을 해야 한다.
 
     뷰는 건드리지 않는다. 뷰를 여기서 drop 하면 재생성(apply_views)까지
-    없는 상태가 되어 `no such table: v_purchases` 가 난다. SQLite 는 뷰가
+    없는 상태가 되어 `no such table: v_coin_ledger` 가 난다. SQLite 는 뷰가
     참조하는 테이블을 그냥 drop 하게 해주고, 뷰 교체는 views.sql 이
     자기 트랜잭션 안에서 통째로 한다.
     """
@@ -248,6 +224,33 @@ def load_file(con: sqlite3.Connection, path: pathlib.Path) -> dict[str, Any]:
     return {"events": len(event_rows), "errors": error_count, "lines": line_count}
 
 
+def load_all(con: sqlite3.Connection, files: list[pathlib.Path],
+             reset: bool) -> dict[str, int]:
+    """파일들을 한 트랜잭션으로 적재하고, 끝나면 인덱스와 통계를 만든다.
+
+    실패하면 롤백하고 예외를 그대로 올린다 — 옛 데이터가 온전히 남는다.
+    loader.py 와 pipeline.py 가 같이 쓴다. 둘이 따로 갖고 있으면 한쪽만
+    고쳐져서 적재 방식이 갈린다.
+    """
+    totals = {"events": 0, "errors": 0, "lines": 0}
+    try:
+        begin_load(con, reset=reset)
+        for path in files:
+            result = load_file(con, path)
+            for k in totals:
+                totals[k] += result[k]
+        con.commit()            # 여기서 비로소 새 데이터가 읽는 쪽에 보인다
+    except (sqlite3.Error, OSError):
+        con.rollback()          # 옛 데이터가 그대로 남는다
+        raise
+
+    # 인덱스는 적재 후에 만든다. 적재 중에 유지하는 것보다 빠르다.
+    con.executescript(INDEXES)
+    con.execute("ANALYZE")      # 질의 계획기에 통계를 준다
+    con.commit()
+    return totals
+
+
 def apply_views(con: sqlite3.Connection, views_path: pathlib.Path,
                 game_views: pathlib.Path | None = None) -> bool:
     """
@@ -329,26 +332,13 @@ def main() -> int:
     if args.reset:
         print("초기화 — 파일은 유지하고 내용만 비운다")
 
-    totals = {"events": 0, "errors": 0, "lines": 0}
+    print(f"적재 시작 — {len(files)}개 파일 → {db_path}")
     try:
-        begin_load(con, reset=args.reset)
-        print(f"적재 시작 — {len(files)}개 파일 → {db_path}")
-        for path in files:
-            result = load_file(con, path)
-            for k in totals:
-                totals[k] += result[k]
-        con.commit()            # 여기서 비로소 새 데이터가 읽는 쪽에 보인다
+        totals = load_all(con, files, reset=args.reset)
     except (sqlite3.Error, OSError) as e:
-        con.rollback()          # 옛 데이터가 그대로 남는다
         print(f"[오류] 적재 실패 — 기존 데이터를 유지한다: {e}", file=sys.stderr)
         con.close()
         return 1
-
-    # 인덱스는 적재 후에 만든다. 적재 중에 유지하는 것보다 빠르다.
-    print("인덱스 생성 중...")
-    con.executescript(INDEXES)
-    con.execute("ANALYZE")      # 질의 계획기에 통계를 준다
-    con.commit()
 
     # 뷰는 DROP/CREATE 라 매번 다시 만들어도 비용이 없고, --reset 뒤에는
     # 반드시 다시 만들어야 한다. 그래서 여기서 자동으로 적용한다.

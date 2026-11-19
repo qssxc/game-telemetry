@@ -29,6 +29,7 @@ import sys
 from collections import defaultdict
 from typing import Any
 
+import merge
 from db import connect
 from merge import Rules, RulesError, dedup_key, load_rules_file
 
@@ -41,26 +42,14 @@ def parse_clock(value: Any) -> dt.datetime | None:
         return None
 
 
-def load_events(con: sqlite3.Connection, session_id: str, player_id: str) -> list[dict]:
-    rows = con.execute(
-        "SELECT seq, t_ms, wall_clock, name FROM events"
-        " WHERE session_id = ? AND player_id = ? ORDER BY seq",
-        (session_id, player_id),
-    ).fetchall()
-
-    params: dict[int, dict[str, Any]] = defaultdict(dict)
-    for seq, key, num, text, flag in con.execute(
-        "SELECT seq, key, num_value, text_value, bool_value FROM event_params"
-        " WHERE session_id = ? AND player_id = ?",
-        (session_id, player_id),
-    ):
-        params[seq][key] = flag if flag is not None else (num if num is not None else text)
-
-    return [
-        {"seq": seq, "t_ms": t_ms, "wall": parse_clock(wall),
-         "name": name, "params": params.get(seq, {})}
-        for seq, t_ms, wall, name in rows
-    ]
+def load_events(con: sqlite3.Connection, session_id: str,
+                players: list[str]) -> dict[str, list[dict]]:
+    """merge.load_events 로 읽고, 시계 비교를 위해 wall_clock 을 시각으로 바꾼다."""
+    by_player = merge.load_events(con, session_id)
+    for events in by_player.values():
+        for e in events:
+            e["wall"] = parse_clock(e["wall"])
+    return {p: by_player.get(p, []) for p in players}
 
 
 def content_key(event: dict) -> tuple:
@@ -281,7 +270,7 @@ def check_session(con, session_id: str, players: list[str], rules: Rules) -> Non
     print("=" * 72)
 
     report_composition(con, session_id, players)
-    ev_by_player = {p: load_events(con, session_id, p) for p in players}
+    ev_by_player = load_events(con, session_id, players)
     broadcast, shared = report_distribution(ev_by_player, rules)
     report_shared_state(ev_by_player, shared, rules)
     report_clock(ev_by_player, broadcast, rules)

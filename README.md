@@ -87,9 +87,8 @@ v_monster_killed_all   2건   ← 원본. 병합이 제대로 됐는지 볼 때
 자른다 — `damage`(33.04)와 `turn_count`(19)를 가르는 지점이고, 손으로 쓸 때
 가장 자주 틀리는 곳이다.
 
-계산이 들어간 뷰는 만들지 못한다. 누적 잔액(`v_resource_ledger`), 중복 제거
-(`v_party_ledger`), 두 이벤트를 한 축으로 묶기(`v_damage`) 는 무엇을 보고
-싶은지 사람이 정해야 한다. 그런 뷰는 게임 폴더의 `views.sql` 에 두면 생성기가 비켜 간다
+계산이 들어간 뷰는 만들지 못한다. 누적 잔액(예: `games/example` 의 `v_coin_ledger`),
+두 이벤트를 한 축으로 묶기 같은 것은 무엇을 보고 싶은지 사람이 정해야 한다. 그런 뷰는 게임 폴더의 `views.sql` 에 두면 생성기가 비켜 간다
 (`WHERE e.name = ...` 을 읽어 해당 이벤트를 건너뛴다).
 
 따로 돌리거나 파일로 받고 싶으면
@@ -103,7 +102,7 @@ python viewgen.py --db playtest.sqlite --skip-existing games/mygame/views.sql --
 ```
 
 `--skip-existing` 을 빼면 손으로 쓴 뷰가 다루는 이벤트까지 만든다. 이름이
-달라서(`v_battles` vs `v_battle_ended`) 덮어쓰지는 않지만 같은 데이터를 보는
+달라서(`v_coin_ledger` vs `v_coins_changed`) 덮어쓰지는 않지만 같은 데이터를 보는
 뷰가 둘이 된다.
 
 ## 저장소를 SQLite 로 한 이유
@@ -120,7 +119,7 @@ python viewgen.py --db playtest.sqlite --skip-existing games/mygame/views.sql --
 마지막 줄이 특히 문제다. DuckDB 는 Metabase 가 파일을 붙들고 있으면
 적재기가 쓰려다 막힌다. 플레이테스트를 받으면서 대시보드를 켜 둘 수 없다.
 
-성능 걱정은 재 봤다(`bench.py`). 합성 데이터 **세션 300개 × 이벤트 1,000건**
+성능 걱정은 재 봤다. 합성 데이터 **세션 300개 × 이벤트 1,000건**
 (이벤트 30만, 파라미터 164만 행, 216MB) 에서
 
 | 작업 | 시간 |
@@ -132,7 +131,7 @@ python viewgen.py --db playtest.sqlite --skip-existing games/mygame/views.sql --
 플레이테스트 현실 규모는 이보다 작다. 테스터 50명 × 3세션 × 700이벤트 ≈
 이벤트 10만 건이다. 여기서는 성능이 선택 기준이 되지 않는다.
 
-가장 느린 질의는 `v_resource_ledger` (LEFT JOIN 4개, 404ms) 다. 더 빠르게
+가장 느린 질의는 LEFT JOIN 4개짜리 누적 잔액 뷰(404ms)였다. 더 빠르게
 해야 하면 `event_params` 에 값까지 포함한 커버링 인덱스를 추가하면 되지만,
 인덱스 크기가 두 배가 되므로 지금은 하지 않았다.
 
@@ -202,9 +201,9 @@ $ python pipeline.py testlogs --reset --push
 `merge.py` 와 `metrics.py` 가 자기 커밋을 하지 않도록 고쳐야 하는데, 지금
 규모에서는 그만한 값어치가 없다고 보고 두었다.
 
-4번은 `METABASE_URL` 과 `METABASE_API_KEY` 환경변수를 읽는다. PowerShell 에는
+5번은 `METABASE_URL` 과 `METABASE_API_KEY` 환경변수를 읽는다. PowerShell 에는
 `export` 가 없으니 `$env:METABASE_URL = "http://localhost:3000"` 으로 설정한다.
-자세한 것은 `metabase_api.py` 머리말과 `METABASE.md` 에 있다.
+자세한 것은 `metabase_api.py` 머리말에 있다.
 
 2인 세션을 처음 받았다면 병합 전에 `merge_check.py` 로 상태를 먼저 본다.
 정의 파일 없이 돌리면 두 파일에 같은 내용으로 들어 있는 이벤트를 **중복
@@ -560,5 +559,5 @@ Steam 기반 게임이라면 SteamID 를 해시해서 쓰면 되고, 지금 구�
 ## 나중에 저장소를 바꿀 때
 
 세로 저장 구조는 특정 DB 기능에 기대지 않는다. Postgres 나 MySQL 로 옮기면
-`loader.py` 의 `connect` 와 `SCHEMA` 만 고치면 되고, `views.sql` 에서 손댈 곳은
+`db.py` 의 `connect` 와 `SCHEMA` 만 고치면 되고, `views.sql` 에서 손댈 곳은
 `json_group_object` 를 쓴 `event_flat` 하나다.

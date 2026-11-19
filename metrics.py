@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-from db import connect,SCHEMA
+from db import SCHEMA, connect
 
 
 AGGREGATES = {
@@ -51,10 +51,10 @@ OPERATORS = {"eq": "=", "ne": "!=", "lt": "<", "lte": "<=", "gt": ">", "gte": ">
 PARAM_AS_TEXT = (
     "COALESCE("
     "  CASE WHEN {p}.num_value = CAST({p}.num_value AS INTEGER)"
-    "       THEN CAST(CAST({p}.num_value AS BIGINT) AS VARCHAR)"
-    "       ELSE CAST({p}.num_value AS VARCHAR) END,"
+    "       THEN CAST(CAST({p}.num_value AS INTEGER) AS TEXT)"
+    "       ELSE CAST({p}.num_value AS TEXT) END,"
     "  {p}.text_value,"
-    "  CAST({p}.bool_value AS VARCHAR)"
+    "  CAST({p}.bool_value AS TEXT)"
     ")"
 )
 
@@ -310,18 +310,26 @@ KNOWN_KEYS = {"name", "type", "scope", "event", "param",
               "by", "where", "default", "formula"}
 
 
-def check_keys(spec: dict[str, Any], name: str) -> None:
-    unknown = set(spec) - KNOWN_KEYS
+def describe_unknown(got, known: set[str]) -> str | None:
+    """모르는 키를 비슷한 이름 힌트와 함께 설명한다. 없으면 None.
+
+    정의 파일의 지표 키(여기)와 merge: 섹션의 키(merge.py)가 같이 쓴다.
+    """
+    unknown = set(got) - known
     if not unknown:
-        return
+        return None
     hints = []
-    for key in sorted(unknown):
-        near = difflib.get_close_matches(key, KNOWN_KEYS, n=1, cutoff=0.6)
+    for key in sorted(map(str, unknown)):
+        near = difflib.get_close_matches(key, known, n=1, cutoff=0.6)
         hints.append(f"{key!r}" + (f" (혹시 {near[0]!r}?)" if near else ""))
-    raise DefinitionError(
-        f"[{name}] 모르는 키: {', '.join(hints)}\n"
-        f"  쓸 수 있는 키: {', '.join(sorted(KNOWN_KEYS))}"
-    )
+    return (f"{', '.join(hints)}\n"
+            f"  쓸 수 있는 키: {', '.join(sorted(known))}")
+
+
+def check_keys(spec: dict[str, Any], name: str) -> None:
+    problem = describe_unknown(spec, KNOWN_KEYS)
+    if problem:
+        raise DefinitionError(f"[{name}] 모르는 키: {problem}")
 
 
 def list_scopes(con: sqlite3.Connection, scope: str) -> list[tuple[str, Any]]:

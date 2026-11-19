@@ -1,18 +1,19 @@
 """
-Metabase 연결 모듈 — 1단계: 서버 확인, 인증, 데이터베이스 목록.
+Metabase 연결 모듈 — 서버 확인 · 인증 · 카드 생성/갱신.
 
 왜 필요한가
 -----------
 지표 정의(YAML)를 고치면 새 지표가 나온다. 그런데 그게 제대로 나왔는지는
 눈으로 봐야 알 수 있고, 보는 곳이 Metabase 다. 지표를 하나 추가할 때마다
 Metabase 에서 카드를 손으로 만들면 "정의만 고치면 된다" 는 말이 거짓이 된다.
-그래서 카드 생성까지 자동화한다. 이 파일은 그 첫 단계다.
+그래서 카드 생성까지 자동화한다.
 
-단계
-----
-  1단계 (이 파일)  서버 확인 · 인증 · DB 목록          ← 연결이 되는지부터
-  2단계            카드 하나 만들기
-  3단계            지표 카드 전체 생성/갱신 (upsert)
+하는 일
+------
+  · 서버 확인 · 인증 · DB 목록          ← 연결이 되는지부터
+  · 컬렉션 준비
+  · 카드 생성/갱신 (upsert) — 지표 정의에서 만든 카드(cardgen.py) +
+    게임 폴더의 손으로 쓴 카드(--cards)
 
 의존성을 늘리지 않는다
 --------------------
@@ -66,6 +67,8 @@ import urllib.parse
 import urllib.request
 import uuid
 from typing import Any
+
+from db import connect
 
 
 class MetabaseError(Exception):
@@ -174,7 +177,7 @@ class Metabase:
             )
         return str(r["id"])
 
-    # ------------------------------------------------------------ 1단계 기능
+    # ------------------------------------------------------------ 서버 · DB
 
     def health(self) -> dict[str, Any]:
         """인증 없이 서버가 떠 있는지만 본다.
@@ -214,7 +217,7 @@ class Metabase:
                 return d
         return None
 
-    # ------------------------------------------------------------ 2단계: 컬렉션
+    # ------------------------------------------------------------ 컬렉션
 
     def collections(self) -> list[dict[str, Any]]:
         r = self._request("GET", "/api/collection")
@@ -234,10 +237,10 @@ class Metabase:
         # color 는 구버전에서 필수였다. 신버전은 무시하므로 넣어두는 편이 안전하다.
         return self._request(
             "POST", "/api/collection",
-            {"name": name, "description": "metrics.py 가 생성한 카드", "color": "#509EE3"},
+            {"name": name, "description": "metabase_api.py 가 생성한 카드", "color": "#509EE3"},
         )
 
-    # ------------------------------------------------------------ 2단계: 카드
+    # ------------------------------------------------------------ 카드
 
     def cards(self) -> list[dict[str, Any]]:
         r = self._request("GET", "/api/card")
@@ -381,7 +384,7 @@ def collect_choices(db_path: str, names: list[str],
     불편하고, Metabase 가 카드마다 그 목록을 통째로 들고 있게 된다.
     """
     choices: dict[str, list[str]] = {}
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con = connect(db_path, readonly=True)
     try:
         objs = con.execute(
             "SELECT name, type FROM sqlite_master "
@@ -445,17 +448,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="이 SQLite 파일이 등록돼 있는지 확인한다")
     ap.add_argument("--push", action="store_true",
                     help="카드를 Metabase 에 생성/갱신한다 "
-                         "(cards.py 의 게임 전용 카드 + --from-yaml 로 생성한 카드)")
-    ap.add_argument("--cards", default="cards",
-                    help="게임 전용 카드를 담은 모듈 이름 (기본: cards). "
-                         "발표용은 cards_presentation")
+                         "(--from-yaml 로 생성한 카드 + --cards 의 손으로 쓴 카드)")
+    ap.add_argument("--cards", default=None, metavar="CARDS.PY",
+                    help="손으로 쓴 게임 전용 카드 파일 (예: games/mygame/cards.py)")
     ap.add_argument("--collection", default="플레이테스트 지표",
                     help="카드를 담을 컬렉션 이름")
     ap.add_argument("--dry-run", action="store_true",
                     help="보내지 않고 무엇이 바뀔지만 보여준다")
     ap.add_argument("--from-yaml", default=None,
                     help="지표 정의 YAML 에서 지표마다 카드를 만든다 "
-                         "(예: hybridrpg.yaml)")
+                         "(예: game.yaml)")
     args = ap.parse_args(argv)
 
     url = args.url or os.environ.get("METABASE_URL", "http://localhost:3000")
@@ -526,15 +528,26 @@ def main(argv: list[str] | None = None) -> int:
 
     # 게임 전용 카드는 선택이다. 새 게임은 지표 정의 YAML 만으로 시작할 수
     # 있어야 하고, 그 게임을 위한 손수 쓴 카드는 나중 일이다.
-    try:
-        import importlib
-        cards = importlib.import_module(args.cards)
-        todo.update({n: (s, cards.DISPLAY.get(n, "table"))
-                     for n, s in cards.CARDS.items()})
-        sample_params = dict(getattr(cards, "SAMPLE_PARAMS", {}))
-        print(f"\n{args.cards}.py — 손으로 쓴 카드 {len(todo)}개")
-    except ImportError:
-        print(f"\n{args.cards}.py 없음 — 지표 정의에서 생성한 카드만 올린다")
+    #
+    # 예전에는 옆에 cards.py 가 있으면 무조건 import 했다. 그러면 다른 게임을
+    # 돌릴 때도 앞 게임의 카드가 같이 올라간다. 이제는 경로로 받은 것만 읽는다.
+    if args.cards:
+        import runpy
+        if not os.path.exists(args.cards):
+            print(f"\n[실패] 카드 파일이 없다: {args.cards}", file=sys.stderr)
+            return 1
+        try:
+            mod = runpy.run_path(args.cards, run_name="game_cards")
+        except Exception as e:
+            print(f"\n[실패] {args.cards} 를 읽지 못했다: {e}", file=sys.stderr)
+            return 1
+        display = mod.get("DISPLAY", {})
+        todo.update({n: (s, display.get(n, "table"))
+                     for n, s in (mod.get("CARDS") or {}).items()})
+        sample_params = dict(mod.get("SAMPLE_PARAMS", {}))
+        print(f"\n{args.cards} — 게임 전용 카드 {len(todo)}개")
+    else:
+        print("\n--cards 없음 — 지표 정의에서 생성한 카드만 올린다")
 
     if args.from_yaml:
         gen = cardgen.from_metrics(args.from_yaml)
@@ -543,7 +556,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not todo:
         print("\n[실패] 올릴 카드가 없다. --from-yaml 로 지표 정의를 주거나 "
-              "cards.py 를 두어라.", file=sys.stderr)
+              "--cards 로 카드 파일을 주어라.", file=sys.stderr)
         return 1
 
     # 보내기 전에 로컬 SQLite 로 쿼리를 돌려본다.
@@ -552,8 +565,7 @@ def main(argv: list[str] | None = None) -> int:
     checked, broken = {}, 0
     local = args.db_file if os.path.exists(args.db_file) else None
     if local:
-        import sqlite3
-        con = sqlite3.connect(f"file:{local}?mode=ro", uri=True)
+        con = connect(local, readonly=True)
         print(f"\n로컬 검사 — {local}")
     else:
         print(f"\n로컬 검사 건너뜀 — {args.db_file} 가 여기 없다")

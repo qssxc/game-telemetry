@@ -8,6 +8,9 @@ __pycache__/
 *.db
 *.ndjson
 
+# viewgen.py 의 기본 출력 — 생성물이다
+views_generated.sql
+
 # Metabase 실행 파일·내부 DB
 metabase/
 

@@ -3,7 +3,7 @@
 
 이 파일이 중립 층이다. 읽는 것은 지표 정의 YAML 과, 어느 게임에나 똑같이
 존재하는 지표 뷰(v_metrics_session · v_metrics_party · v_metrics_dimension)
-뿐이다. 게임 고유의 뷰(v_battles, v_purchases ...)나 이벤트 이름은 쓰지 않는다.
+뿐이다. 게임 고유의 뷰(games/<게임>/views.sql)나 이벤트 이름은 쓰지 않는다.
 
 그래서 새 게임에 붙일 때 이 파일은 손대지 않는다. 필요한 것은 그 게임의
 지표 정의 YAML 하나뿐이다. 손으로 쓴 게임 전용 카드는 선택이다.
