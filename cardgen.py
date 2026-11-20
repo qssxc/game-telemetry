@@ -2,8 +2,8 @@
 지표 정의에서 Metabase 카드를 만든다. **게임을 모른다.**
 
 이 파일이 중립 층이다. 읽는 것은 지표 정의 YAML 과, 어느 게임에나 똑같이
-존재하는 지표 뷰(v_metrics_session · v_metrics_party · v_metrics_dimension)
-뿐이다. 게임 고유의 뷰(games/<게임>/views.sql)나 이벤트 이름은 쓰지 않는다.
+존재하는 지표 뷰(v_metrics_session · v_metrics_party · v_metrics_dimension ·
+v_metrics_global · v_metrics_global_dimension) 뿐이다. 게임 고유의 뷰(games/<게임>/views.sql)나 이벤트 이름은 쓰지 않는다.
 
 그래서 새 게임에 붙일 때 이 파일은 손대지 않는다. 필요한 것은 그 게임의
 지표 정의 YAML 하나뿐이다. 손으로 쓴 게임 전용 카드는 선택이다.
@@ -25,6 +25,10 @@ from typing import Any
 # 깨지거나, 더 나쁘게는 엉뚱한 쿼리가 된다. 모양을 먼저 확인한다.
 # \w 는 한글도 받으므로 한글 지표 이름은 통과한다.
 NAME_RE = re.compile(r"^\w+$")
+
+# 세션·플레이어별 값을 모아도 원본에서 다시 센 것과 같아지는 지표 종류와,
+# 그때 쓸 집계 함수. avg 는 여기 없다 — 평균의 합이나 평균의 평균은 틀린다.
+COMBINE = {"count": "SUM", "sum": "SUM", "min": "MIN", "max": "MAX"}
 
 
 def session_label(col: str = "session_id") -> str:
@@ -71,18 +75,19 @@ def from_metrics(yaml_path: str) -> dict[str, tuple[str, str]]:
     """지표 정의 파일에서 카드를 만든다.
 
     돌려주는 모양: {카드이름: (sql, 차트종류)}
+    정의 파일의 모양이 틀리면 metrics.DefinitionError 를 낸다.
 
-    지표의 scope 와 by 에 따라 세 가지로 갈린다.
+    지표의 scope 와 by 에 따라 갈린다.
+      scope: global       전역값 하나
       scope: party        세션당 한 행 (참가자 수를 같이 보여준다)
-      by: 있음            축으로 쪼갠 카드
+      by: 있음            축으로 쪼갠 카드 — 지표 종류에 맞게 모은다
       그 외               세션 × 플레이어 카드
     """
-    import yaml
-    with open(yaml_path, encoding="utf-8") as f:
-        spec = yaml.safe_load(f) or {}
+    import metrics
+    spec = metrics.load_definition(yaml_path)
 
     out: dict[str, tuple[str, str]] = {}
-    for m in spec.get("metrics") or []:
+    for m in spec["metrics"]:
         name = m.get("name")
         if not name:
             continue
@@ -91,9 +96,44 @@ def from_metrics(yaml_path: str) -> dict[str, tuple[str, str]]:
             continue
 
         scope = m.get("scope", "session")
-        by = m.get("by")
+        kind = m.get("type")
+        # formula 는 by 를 쓰지 않는다(축별 값이 없다). 축 카드를 만들면 빈다.
+        by = m.get("by") if kind != "formula" else None
+        if by is not None and not NAME_RE.match(str(by)):
+            print(f"  [건너뜀] {name}: by 에 쓸 수 없는 문자: {by!r}")
+            continue
 
-        if scope == "party" and not by:
+        if by and (scope == "global" or kind not in COMBINE):
+            # 세션별 값을 모아서는 맞는 값이 안 나오는 경우다 — avg 는 세션 평균을
+            # 더하거나 평균내면 틀린다. metrics.py 가 원본에서 다시 센 축별
+            # 전역값을 그대로 보여준다. 세션 필터는 둘 수 없다.
+            out[f"지표 · {name} ({by})"] = (f"""
+SELECT dimension_value  AS "{by}",
+       ROUND(value, 2)  AS "{name}"
+FROM v_metrics_global_dimension
+WHERE metric_name = '{name}'
+ORDER BY 2 DESC
+""", "bar")
+        elif by:
+            # count · sum 은 더하고, min · max 는 그대로 min · max 를 취하면
+            # 세션·플레이어를 몇 개 묶든 맞는 값이 된다. 그래서 세션 필터를 둔다.
+            agg = COMBINE[kind]
+            out[f"지표 · {name} ({by})"] = (f"""
+SELECT dimension_value          AS "{by}",
+       ROUND({agg}(value), 2)    AS "{name}"
+FROM v_metrics_dimension
+WHERE metric_name = '{name}'
+  [[AND session_id = {{{{session_id}}}}]]
+GROUP BY 1
+ORDER BY 2 DESC
+""", "bar")
+        elif scope == "global":
+            out[f"지표 · {name}"] = (f"""
+SELECT ROUND(value, 2) AS "{name}"
+FROM v_metrics_global
+WHERE metric_name = '{name}'
+""", "scalar")
+        elif scope == "party":
             # 파티 지표는 세션당 한 행이다. 참가자 수를 같이 내보낸다 —
             # 1인 세션과 4인 세션의 파티 합계를 나란히 놓으면 오해하기 쉽다.
             out[f"파티 · {name}"] = (f"""
@@ -104,16 +144,6 @@ FROM v_metrics_party
 WHERE metric_name = '{name}'
   [[AND session_id = {{{{session_id}}}}]]
 ORDER BY 1
-""", "bar")
-        elif by:
-            out[f"지표 · {name} ({by})"] = (f"""
-SELECT dimension_value      AS "{by}",
-       ROUND(SUM(value), 2) AS "{name}"
-FROM v_metrics_dimension
-WHERE metric_name = '{name}'
-  [[AND session_id = {{{{session_id}}}}]]
-GROUP BY 1
-ORDER BY 2 DESC
 """, "bar")
         else:
             # 세션과 플레이어를 함께 축에 쓴다. player_id 는 세션 안에서만

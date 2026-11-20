@@ -1,9 +1,14 @@
+import pathlib
 import sqlite3
 import sys
 
 def connect(db_path: str, fast: bool = False, readonly=False):
     if readonly:
-        return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        # 경로를 그대로 URI 에 넣으면 안 된다. `#` 뒤는 조각, `?` 뒤는 질의로
+        # 읽혀 경로가 잘리고 mode=ro 도 떨어져 나간다 — 엉뚱한 곳에 빈 파일을
+        # 읽기·쓰기로 새로 만든다. as_uri 가 그런 글자를 %XX 로 바꿔 준다.
+        uri = pathlib.Path(db_path).resolve().as_uri() + "?mode=ro"
+        return sqlite3.connect(uri, uri=True)
     con = sqlite3.connect(db_path)
     con.execute("PRAGMA journal_mode = WAL")
     con.execute("PRAGMA foreign_keys = ON")

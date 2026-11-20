@@ -98,7 +98,7 @@ def do_load(con, log_dir: pathlib.Path, reset: bool, views: pathlib.Path,
 
     try:
         totals = loader.load_all(con, files, reset=reset)
-    except (sqlite3.Error, OSError) as e:
+    except (sqlite3.Error, OSError, loader.LoadError) as e:
         raise StepFailed(f"적재 실패 — 기존 데이터를 유지한다: {e}") from e
 
     if not loader.apply_views(con, views, game_views):
@@ -136,7 +136,7 @@ def do_viewgen(con, game_views: pathlib.Path | None, prefix: str) -> str:
     import viewgen
     # 게임 뷰가 손으로 다루는 이벤트는 건너뛴다. 기본 뷰에는 이벤트 이름이 없다.
     skip = viewgen.covered_events(game_views) if game_views else set()
-    parts, made = viewgen.generate(con, skip, prefix)
+    parts, made, stale = viewgen.generate(con, skip, prefix)
 
     if not parts:
         raise StepFailed("만들 뷰가 없다 — 적재가 됐는지 확인하라")
@@ -148,16 +148,17 @@ def do_viewgen(con, game_views: pathlib.Path | None, prefix: str) -> str:
     if deduped:
         note += (f" (중복 이벤트 {len(deduped)}종은 canonical=1 만 본다: "
                  f"{', '.join(deduped)})")
+    if stale:
+        note += f", 옛 자동 뷰 {len(stale)}개 지움"
     return note
 
 
 def do_metrics(con, yaml_path: pathlib.Path) -> str:
-    import yaml as _yaml
     import metrics
     if not yaml_path.exists():
         raise StepFailed(f"지표 정의 파일이 없다: {yaml_path}")
-    definition = _yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     try:
+        definition = metrics.load_definition(yaml_path)
         written = metrics.compute(con, definition)
     except metrics.DefinitionError as e:
         # 정의가 틀렸으면 아무것도 쓰지 않는다. 절반만 계산된 결과를 남기면
@@ -245,7 +246,13 @@ def main() -> int:
         n = 0
         if args.skip_load:
             total -= 1
-            print(f"적재 건너뜀 — 기존 {db_path} 를 쓴다")
+            print(f"적재 건너뜀 — 기존 {db_path} 를 쓴다 (뷰는 다시 적용한다)")
+            # 뷰는 다시 적용한다. 게임 views.sql 을 고쳤다면 그 뷰가 다루는 이벤트의
+            # 자동 뷰를 이벤트 뷰 단계가 지우는데, 손으로 쓴 새 뷰가 아직 없으면
+            # 그 이벤트를 볼 뷰가 하나도 없게 된다. 한 트랜잭션이라 비용도 작다.
+            import loader
+            if not loader.apply_views(con, views, game_views):
+                raise StepFailed("뷰 적용 실패 — 위 메시지를 보라")
         else:
             n += 1
             run_step(n, total, f"적재 — {args.log_dir} → {db_path}",

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import pathlib
 import sqlite3
 import statistics
 import sys
@@ -144,20 +145,25 @@ def report_shared_state(ev_by_player: dict[str, list[dict]], shared: list[str],
         print("    공유 상태 규칙에 걸리는 이벤트가 두 파일에 겹치지 않는다.")
         return
 
+    # 같은 키가 한 세션에 여러 번 나올 수 있다(같은 금액 거래 반복).
+    # merge.py 처럼 파일 안에서 k 번째 등장끼리 같은 사건으로 센다.
+    # 키만으로 묶으면 반복된 거래가 한 건으로 뭉쳐 실제보다 적게 보인다.
     groups: dict[tuple, dict[str, dict]] = defaultdict(dict)
     for p, evs in ev_by_player.items():
+        seen: dict[tuple, int] = defaultdict(int)
         for e in evs:
             if e["name"] not in shared:
                 continue
             k = dedup_key(e, rules)
             if k is not None:
-                groups[k][p] = e
+                groups[(k, seen[k])][p] = e
+                seen[k] += 1
 
     dup = {k: v for k, v in groups.items() if len(v) > 1}
     print(f"    고유 사건 {len(groups)}개 중 {len(dup)}개가 여러 파일에 있다")
 
     by_event: dict[str, list[int]] = defaultdict(lambda: [0, 0])
-    for k, v in groups.items():
+    for (k, _), v in groups.items():
         by_event[k[0]][0] += 1
         by_event[k[0]][1] += len(v)
     for name in sorted(by_event):
@@ -197,33 +203,43 @@ def report_clock(ev_by_player: dict[str, list[dict]], broadcast: list[str],
         obs_name = pair.observed
         legs = []
         for src, dst in ((a, b), (b, a)):
-            own = [e for e in ev_by_player[src] if e["name"] == pair.cause and e["wall"]]
-            seen = [e for e in ev_by_player[dst]
-                    if e["name"] == obs_name and e["wall"]
-                    and pair.player_of(e) == src]
+            own = sorted((e for e in ev_by_player[src]
+                          if e["name"] == pair.cause and e["wall"]),
+                         key=lambda e: e["wall"])
+            seen = sorted((e for e in ev_by_player[dst]
+                           if e["name"] == obs_name and e["wall"]
+                           and pair.player_of(e) == src),
+                          key=lambda e: e["wall"])
             if not own or not seen:
                 continue
-            # 관측 직전의 당사자 사건을 원인으로 본다
-            obs = seen[0]
-            cause = max((e for e in own), key=lambda e: e["wall"])
-            legs.append((src, dst, (obs["wall"] - cause["wall"]).total_seconds()))
+            # k 번째 원인을 k 번째 관측과 짝짓는다. "가장 늦은 원인" 이나
+            # "관측 직전의 원인" 으로 고르면 안 된다 — 두 시계가 어긋나 있어
+            # 직전·직후를 가를 기준이 없고, 한 사람이 두 번 죽으면 첫 관측이
+            # 두 번째 죽음과 짝지어져 오차가 수십 초로 튄다.
+            if len(own) != len(seen):
+                print(f"    [주의] {src} 의 {pair.cause} {len(own)}건, "
+                      f"{dst} 가 관측한 {obs_name} {len(seen)}건 — "
+                      f"앞에서부터 {min(len(own), len(seen))}쌍만 쓴다")
+            gaps = [(o["wall"] - c["wall"]).total_seconds()
+                    for c, o in zip(own, seen)]
+            legs.append((src, dst, statistics.median(gaps), len(gaps)))
 
         if len(legs) == 2:
-            # leg1: dst 가 src 보다 g1 만큼 늦게 관측 (dst 시계 기준)
-            # g1 = D - C,  g2 = D + C   (C = b 시계가 a 보다 앞선 양)
-            (s1, _, g1), (s2, _, g2) = legs
-            if s1 == a:
-                offset = (g1 - g2) / 2.0
-            else:
-                offset = (g2 - g1) / 2.0
-            delay = (g1 + g2) / 2.0
+            # C = b 의 시계가 a 보다 앞선 양, D = 전달 지연
+            #   a → b 관측 (b 시계로 잰 관측 − a 시계로 잰 원인): g_ab = D + C
+            #   b → a 관측 (a 시계로 잰 관측 − b 시계로 잰 원인): g_ba = D − C
+            gap = {(s_, d_): g for s_, d_, g, _ in legs}
+            g_ab, g_ba = gap[(a, b)], gap[(b, a)]
+            offset = (g_ab - g_ba) / 2.0
+            delay = (g_ab + g_ba) / 2.0
             estimates.append((obs_name, offset, delay, legs))
 
     if estimates:
         for name, offset, delay, legs in estimates:
             print(f"    왕복 쌍 '{name}' 로 분리")
-            for src, dst, gap in legs:
-                print(f"      {src} 의 사건 → {dst} 가 관측: {gap:+.3f}초")
+            for src, dst, gap, n in legs:
+                many = f" (쌍 {n}개의 중앙값)" if n > 1 else ""
+                print(f"      {src} 의 사건 → {dst} 가 관측: {gap:+.3f}초{many}")
             print(f"    → 시계 오차 약 {offset * 1000:+.0f}ms ({b} 가 {a} 보다 앞섬)")
             print(f"    → 전달 지연 약 {delay:.2f}초 (게임 로직 대기 포함)")
             window = max(200, int(abs(offset) * 1000 * 3))
@@ -296,6 +312,9 @@ def main() -> int:
     if rules.empty:
         print("merge 규칙 없이 본다 — 두 파일에 같은 내용으로 있는 이벤트를 후보로 짚는다")
 
+    if not pathlib.Path(args.db).exists():
+        print(f"[오류] DB 가 없다: {args.db}", file=sys.stderr)
+        return 1
     con = connect(args.db)
 
     grouped: dict[str, list[str]] = defaultdict(list)

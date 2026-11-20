@@ -56,7 +56,12 @@ SELECT
             CASE WHEN p.num_value = CAST(p.num_value AS INTEGER)
                  THEN CAST(p.num_value AS INTEGER)
                  ELSE p.num_value END,
-            p.text_value,
+            -- 목록·객체 파라미터는 loader 가 JSON 글자로 넣는다. json() 으로 감싸야
+            -- 문자열이 아니라 JSON 으로 들어가 json_extract(params, '$.stats.hp')
+            -- 처럼 안쪽을 꺼낼 수 있다.
+            CASE WHEN substr(p.text_value, 1, 1) IN ('{', '[') AND json_valid(p.text_value)
+                 THEN json(p.text_value)
+                 ELSE p.text_value END,
             p.bool_value
         )
     ) AS params
@@ -87,8 +92,11 @@ LEFT JOIN sessions s ON s.session_id = m.session_id
 WHERE m.scope = 'session' AND m.dimension_key = '';
 
 
--- 축으로 쪼갠 지표. 축 이름이 칼럼이 아니라 값으로 들어 있어, 축을
--- 추가해도 이 뷰를 고칠 필요가 없다.
+-- 축으로 쪼갠 지표 (세션·파티 범위). 축 이름이 칼럼이 아니라 값으로 들어
+-- 있어, 축을 추가해도 이 뷰를 고칠 필요가 없다.
+--
+-- 전역 행은 뺀다. 넣으면 축별 합계를 낼 때 전역값이 한 번 더 더해진다.
+-- 축별 전역값은 v_metrics_global_dimension 으로 본다.
 DROP VIEW IF EXISTS v_metrics_dimension;
 CREATE VIEW v_metrics_dimension AS
 SELECT
@@ -99,7 +107,7 @@ SELECT
     m.dimension_value,
     m.value
 FROM metric_results m
-WHERE m.dimension_key != '';
+WHERE m.dimension_key != '' AND m.scope != 'global';
 
 
 -- 파티 범위 지표 (scope: party). 세션 하나당 한 행이고 player_id 는 없다.
@@ -124,3 +132,13 @@ CREATE VIEW v_metrics_global AS
 SELECT metric_name, value, computed_at
 FROM metric_results
 WHERE scope = 'global' AND dimension_key = '';
+
+
+-- 축별 전역 지표. 원본 이벤트에서 다시 센 값이라 avg · min · max 도 맞다.
+-- v_metrics_dimension 의 세션별 값을 더하면 count · sum 은 맞지만 avg 는
+-- 틀린다(세션 평균의 합이 된다). 축별 평균은 이 뷰에서 본다.
+DROP VIEW IF EXISTS v_metrics_global_dimension;
+CREATE VIEW v_metrics_global_dimension AS
+SELECT metric_name, dimension_key, dimension_value, value, computed_at
+FROM metric_results
+WHERE scope = 'global' AND dimension_key != '';

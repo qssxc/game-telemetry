@@ -87,6 +87,11 @@ v_monster_killed_all   2건   ← 원본. 병합이 제대로 됐는지 볼 때
 자른다 — `damage`(33.04)와 `turn_count`(19)를 가르는 지점이고, 손으로 쓸 때
 가장 자주 틀리는 곳이다.
 
+칼럼 이름은 따옴표로 감싸므로 `order` `from` `to` `index` 처럼 SQL 예약어인
+파라미터 이름도 그대로 칼럼이 된다. 더 이상 만들지 않는 옛 자동 뷰 — 이벤트가
+로그에서 사라졌거나, 중복이 없어져 `_all` 이 필요 없거나, 손으로 쓴 뷰가 그
+이벤트를 맡게 된 경우 — 는 생성할 때 지운다. 손으로 쓴 뷰는 건드리지 않는다.
+
 계산이 들어간 뷰는 만들지 못한다. 누적 잔액(예: `games/example` 의 `v_coin_ledger`),
 두 이벤트를 한 축으로 묶기 같은 것은 무엇을 보고 싶은지 사람이 정해야 한다. 그런 뷰는 게임 폴더의 `views.sql` 에 두면 생성기가 비켜 간다
 (`WHERE e.name = ...` 을 읽어 해당 이벤트를 건너뛴다).
@@ -300,6 +305,9 @@ docker run -d -p 3000:3000 \
 - 한 줄에 이벤트 하나인 NDJSON. 줄마다 `session_id` `player_id` `seq` 가 있어야
   하고(없으면 그 줄을 건너뛴다), `name` `t_ms` `wall_clock` 과 `params` 객체를 읽는다.
 - 참가자마다 파일 하나. 협동 세션이면 참가자들의 `session_id` 가 같아야 한다.
+  한 참가자의 로그가 두 파일에 나뉘어 있거나 한 파일에 여러 세션이 섞여 있으면
+  `loader.py` 가 **적재를 멈춘다.** 그대로 넣으면 앞 파일의 파라미터가 오류 없이
+  지워지고 모드·호스트 정보가 비기 때문이다.
 - 세션 정보는 두 이벤트에서 뽑는다. 이름이 다르면 `sessions` 의 해당 칼럼이 빈다.
   - `session_started` — `mode` `is_host` `platform` `started_at` `clock_offset_ms`
   - `session_ended` — `duration_ms` `dropped_count`
@@ -311,20 +319,24 @@ docker run -d -p 3000:3000 \
 필요가 없다** — 이게 이 구조의 요점이다. 틀은 `games/example/game.yaml` 에 있다.
 
 ```yaml
-- name: battle_count
-  type: count
-  event: battle_ended
+metrics:
+  - name: battle_count
+    type: count
+    event: battle_ended
 
-- name: battle_won
-  type: count
-  event: battle_ended
-  where:
-    is_victory: true
+  - name: battle_won
+    type: count
+    event: battle_ended
+    where:
+      is_victory: true
 
-- name: win_rate
-  type: formula
-  formula: battle_won / battle_count
+  - name: win_rate
+    type: formula
+    formula: battle_won / battle_count
 ```
+
+지표 목록은 반드시 `metrics:` 아래에 둔다. 같은 파일에 협동 병합 규칙(`merge:`)
+이 함께 들어가기 때문이다. 맨 위가 목록이면 멈추고 알려준다.
 
 | 종류 | 설명 |
 |---|---|
@@ -334,7 +346,9 @@ docker run -d -p 3000:3000 \
 
 보조 항목
 
-- `by` — 그 파라미터를 축으로 쪼갠다 (아이템별, 카테고리별 ...)
+- `by` — 그 파라미터를 축으로 쪼갠다 (아이템별, 카테고리별 ...).
+  축별 전역값도 원본에서 다시 센다(`v_metrics_global_dimension`). 세션별 평균을
+  더하거나 평균내면 틀리므로, `avg` 의 축별 카드는 이 전역값을 보여준다.
 - `where` — 파라미터 조건. 연산자 `eq ne lt lte gt gte`
 - `default` — 해당 이벤트가 0건일 때 채울 값
 - `scope` — 묶는 단위. `session`(기본) `party` `global`
@@ -356,6 +370,11 @@ docker run -d -p 3000:3000 \
 
 수식에서 `party.지표이름` 으로 같은 세션의 파티 값을 가져올 수 있다.
 협동 게임에서 묻고 싶은 것은 대개 "파티 전체 중 내 몫" 의 모양이다.
+
+범위가 다른 지표를 이름만으로 부르면 **멈춘다.** 세션 수식에서 파티 지표를
+`party.` 없이 쓰면 세션 범위에는 그 값이 영영 없어서, 그대로 두면 지표가
+"데이터 없음" 으로 통째로 빈다. `by` 로 쪼갠 지표도 값이 축마다 여러 개라
+수식에 쓸 수 없다. `scope: global` 수식은 모든 지표의 전역값을 이름으로 부른다.
 
 ```yaml
 - name: party_gold_spent      # 파티 전체 지출

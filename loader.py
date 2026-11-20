@@ -57,6 +57,10 @@ ENVELOPE_KEYS = {
 MAX_EXACT_INT = 2 ** 53
 
 
+class LoadError(Exception):
+    """로그 파일이 이 적재기의 전제를 어겼다. 적재 전체를 되돌린다."""
+
+
 def begin_load(con: sqlite3.Connection, reset: bool) -> None:
     """
     트랜잭션을 열고 스키마를 준비한다. COMMIT 하지 않고 돌아간다.
@@ -118,6 +122,10 @@ def split_param(value: Any) -> tuple[float | None, str | None, bool | None]:
         return float(value), None, None
     if value is None:
         return None, None, None
+    if isinstance(value, (dict, list)):
+        # str() 로 바꾸면 파이썬 표기({'hp': 10})가 되어 JSON 으로 읽을 수 없다.
+        # event_flat 의 json_extract 나 Metabase 에서 풀어 볼 수 있게 JSON 으로 둔다.
+        return None, json.dumps(value, ensure_ascii=False), None
     return None, str(value), None
 
 
@@ -127,6 +135,7 @@ def load_file(con: sqlite3.Connection, path: pathlib.Path) -> dict[str, Any]:
     param_rows: list[tuple] = []
 
     session_id = player_id = None
+    ids: set[tuple[str, str]] = set()
     session_meta: dict[str, Any] = {}
     duration_ms = dropped_count = None
     error_count = 0
@@ -148,6 +157,7 @@ def load_file(con: sqlite3.Connection, path: pathlib.Path) -> dict[str, Any]:
             continue
 
         session_id, player_id = sid, pid
+        ids.add((sid, pid))
         params = ev.get("params") or {}
 
         event_rows.append((
@@ -177,6 +187,24 @@ def load_file(con: sqlite3.Connection, path: pathlib.Path) -> dict[str, Any]:
     if session_id is None:
         print(f"  [건너뜀] {path.name} — 유효한 이벤트가 없다")
         return {"events": 0, "errors": error_count, "lines": line_count}
+
+    # 이 적재기는 "파일 하나 = (세션, 플레이어) 하나" 를 전제로 한다. 아래에서
+    # 그 플레이어의 파라미터를 지우고 다시 넣고, 세션 행을 이 파일 내용으로
+    # 덮어쓰기 때문이다. 전제가 깨진 파일을 그대로 넣으면 오류 없이 앞 파일의
+    # 파라미터가 사라지고 모드·호스트 정보가 빈다. 쓰기 전에 멈춘다.
+    if len(ids) > 1:
+        shown = ", ".join(f"{s}/{p}" for s, p in sorted(ids)[:5])
+        raise LoadError(
+            f"{path.name} 에 세션·플레이어가 {len(ids)}쌍 섞여 있다 ({shown}). "
+            f"파일 하나에는 한 세션의 한 참가자만 있어야 한다.")
+    prev = con.execute(
+        "SELECT source_file FROM sessions WHERE session_id = ? AND player_id = ?",
+        (session_id, player_id)).fetchone()
+    if prev and prev[0] != path.name:
+        raise LoadError(
+            f"{session_id}/{player_id} 의 로그가 {prev[0]} 와 {path.name} 두 파일에 있다. "
+            f"한 참가자의 로그가 여러 파일로 나뉘었다면 하나로 합친다. "
+            f"파일 이름만 바뀐 것이면 --reset 으로 다시 적재한다.")
 
     # 커밋하지 않는다. 호출자(main)가 열어둔 트랜잭션에 그대로 쌓이고,
     # 적재가 전부 끝난 뒤 한 번 커밋된다. 예전에는 `with con:` 으로 파일마다
@@ -240,7 +268,7 @@ def load_all(con: sqlite3.Connection, files: list[pathlib.Path],
             for k in totals:
                 totals[k] += result[k]
         con.commit()            # 여기서 비로소 새 데이터가 읽는 쪽에 보인다
-    except (sqlite3.Error, OSError):
+    except (sqlite3.Error, OSError, LoadError):
         con.rollback()          # 옛 데이터가 그대로 남는다
         raise
 
@@ -335,7 +363,7 @@ def main() -> int:
     print(f"적재 시작 — {len(files)}개 파일 → {db_path}")
     try:
         totals = load_all(con, files, reset=args.reset)
-    except (sqlite3.Error, OSError) as e:
+    except (sqlite3.Error, OSError, LoadError) as e:
         print(f"[오류] 적재 실패 — 기존 데이터를 유지한다: {e}", file=sys.stderr)
         con.close()
         return 1

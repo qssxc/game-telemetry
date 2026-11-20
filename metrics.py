@@ -76,15 +76,23 @@ class FormulaEvaluator:
     전자는 정의 파일의 잘못이므로 멈추고 알려야 하고, 후자는 흔한 일이다 —
     전투를 한 번도 안 한 세션에 승률이 없는 것은 오류가 아니다. 이 경우
     수식은 값 없음(None)이 되고 그 행은 적재되지 않는다.
+
+    "범위가 달라 원래 값이 있을 수 없다" 도 전자로 본다. 세션 수식에서 파티
+    지표를 이름만으로 부르면 세션 범위에는 그 값이 영영 없다. 데이터 없음으로
+    넘기면 "건너뜀 N개" 만 찍히고 지표가 통째로 빈다.
+
+    declared  {지표 이름: (범위, by)} — 지금까지 선언된 지표
+    scope     이 수식을 평가하는 범위. global 이면 모든 지표의 전역값을 이름으로
+              부를 수 있다.
     """
 
     ALLOWED_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div)
 
-    def __init__(self, values: dict[str, float], declared: set[str],
-                 declared_party: set[str] | None = None):
+    def __init__(self, values: dict[str, float],
+                 declared: dict[str, tuple[str, str | None]], scope: str):
         self.values = values
         self.declared = declared
-        self.declared_party = declared_party or set()
+        self.scope = scope
 
     def eval(self, expression: str) -> float | None:
         try:
@@ -102,12 +110,14 @@ class FormulaEvaluator:
         if isinstance(node, ast.Name):
             if node.id in self.values:
                 return self.values[node.id]
-            if node.id in self.declared:
-                return None       # 선언은 되어 있으나 이 범위에 데이터가 없다
-            raise DefinitionError(
-                f"수식이 참조한 지표가 정의 파일에 없다: {node.id!r}. "
-                f"이름을 확인하고, 이 지표보다 앞에 선언되어 있는지 보라."
-            )
+            if node.id not in self.declared:
+                raise DefinitionError(
+                    f"수식이 참조한 지표가 정의 파일에 없다: {node.id!r}. "
+                    f"이름을 확인하고, 이 지표보다 앞에 선언되어 있는지 보라."
+                )
+            if self.scope != "global":
+                self._check_reachable(node.id)
+            return None           # 선언은 되어 있으나 이 범위에 데이터가 없다
 
         # party.어떤지표 — 같은 세션의 파티 값을 가져온다.
         # "내 지출 ÷ 파티 지출" 같은 기여도 지표가 이 모양이라, 범위를
@@ -121,9 +131,15 @@ class FormulaEvaluator:
             key = f"party.{node.attr}"
             if key in self.values:
                 return self.values[key]
-            if node.attr in self.declared_party:
+            ref_scope, ref_by = self.declared.get(node.attr, (None, None))
+            if ref_scope == "party":
+                if ref_by and self.scope != "global":
+                    raise DefinitionError(
+                        f"party.{node.attr} 는 by: {ref_by} 로 쪼갠 지표라 수식에서 "
+                        f"한 값으로 쓸 수 없다. by 없는 지표를 따로 선언해 참조하라."
+                    )
                 return None       # 파티 지표로 선언됐으나 이 세션에 값이 없다
-            if node.attr in self.declared:
+            if ref_scope is not None:
                 raise DefinitionError(
                     f"{node.attr!r} 는 party 범위로 선언되지 않았다. "
                     f"party.{node.attr} 로 참조하려면 그 지표에 "
@@ -157,6 +173,30 @@ class FormulaEvaluator:
         raise DefinitionError(
             f"수식에 허용되지 않은 문법이 있다: {type(node).__name__}. "
             f"사칙연산과 지표 이름만 쓸 수 있다."
+        )
+
+    def _check_reachable(self, name: str) -> None:
+        """이 범위의 수식에서 이름만으로 부를 수 있는 지표인지 본다."""
+        ref_scope, ref_by = self.declared[name]
+        if ref_by:
+            raise DefinitionError(
+                f"{name!r} 는 by: {ref_by} 로 쪼갠 지표라 수식에서 한 값으로 쓸 수 없다. "
+                f"by 없는 지표를 따로 선언해 참조하라."
+            )
+        if ref_scope == self.scope:
+            return
+        label = {"session": "세션", "party": "파티", "global": "전역"}
+        hint = ""
+        if ref_scope == "party" and self.scope == "session":
+            hint = f" 같은 세션의 파티 값이면 party.{name} 로 쓴다."
+        elif ref_scope == "global":
+            hint = " 전역 지표는 scope: global 수식에서만 참조할 수 있다."
+        elif ref_scope == "session" and self.scope == "party":
+            hint = (" 파티 수식에는 파티 지표만 쓸 수 있다 — 같은 정의로 "
+                    "scope: party 지표를 하나 더 선언해 참조하라.")
+        raise DefinitionError(
+            f"{name!r} 는 {label[ref_scope]} 범위 지표라 {label[self.scope]} 범위 "
+            f"수식에서 이름만으로 참조할 수 없다 — 값이 항상 비게 된다.{hint}"
         )
 
 
@@ -326,6 +366,42 @@ def describe_unknown(got, known: set[str]) -> str | None:
             f"  쓸 수 있는 키: {', '.join(sorted(known))}")
 
 
+def load_definition(path: str | pathlib.Path) -> dict[str, Any]:
+    """정의 파일을 읽어 맨 위 모양까지 확인한다.
+
+    맨 위는 `metrics:` (와 선택으로 `merge:`)를 가진 모음이어야 한다.
+    목록만 있는 파일, 빈 파일, YAML 문법 오류는 여기서 사람이 읽을 수 있는
+    오류로 바꾼다. 그대로 두면 AttributeError 같은 traceback 으로 끝난다.
+    """
+    try:
+        data = yaml.safe_load(pathlib.Path(path).read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        raise DefinitionError(f"{path} 를 YAML 로 읽지 못했다: {e}") from e
+    check_definition(data)
+    return data
+
+
+def check_definition(data: Any) -> None:
+    if isinstance(data, list):
+        raise DefinitionError(
+            "정의 파일의 맨 위가 목록이다. 지표 목록은 `metrics:` 아래에 둔다.\n"
+            "    metrics:\n"
+            "      - name: battle_count\n"
+            "        ...")
+    if not isinstance(data, dict):
+        raise DefinitionError(
+            "정의 파일이 비어 있거나 모양이 틀렸다. 맨 위에 `metrics:` 가 있어야 한다.")
+    metrics = data.get("metrics")
+    if not metrics:
+        raise DefinitionError("metrics 가 비어 있다")
+    if not isinstance(metrics, list):
+        raise DefinitionError("metrics 는 지표의 목록이어야 한다 (각 항목 앞에 '- ')")
+    for i, spec in enumerate(metrics):
+        if not isinstance(spec, dict):
+            raise DefinitionError(
+                f"metrics 의 {i + 1}번째 항목이 `name: ...` 꼴이 아니다: {spec!r}")
+
+
 def check_keys(spec: dict[str, Any], name: str) -> None:
     problem = describe_unknown(spec, KNOWN_KEYS)
     if problem:
@@ -375,9 +451,8 @@ def scope_values(con: sqlite3.Connection, scope: str,
 
 
 def compute(con: sqlite3.Connection, definition: dict[str, Any]) -> int:
-    metrics = definition.get("metrics") or []
-    if not metrics:
-        raise DefinitionError("metrics 가 비어 있다")
+    check_definition(definition)
+    metrics = definition["metrics"]
 
     # SCHEMA 는 여러 문장이라 executescript 가 필요하다.
     con.executescript(SCHEMA)
@@ -387,9 +462,9 @@ def compute(con: sqlite3.Connection, definition: dict[str, Any]) -> int:
     global_values: dict[str, float] = {}
     rows_written = 0
 
-    # 이미 선언된 지표 이름. 오타와 "데이터 없음" 을 구분하는 데 쓴다.
-    declared: set[str] = set()
-    declared_party: set[str] = set()
+    # 이미 선언된 지표 {이름: (범위, by)}. 오타와 "데이터 없음" 을 구분하고,
+    # 범위가 달라 값이 있을 수 없는 참조를 잡는 데 쓴다.
+    declared: dict[str, tuple[str, str | None]] = {}
 
     for spec in metrics:
         name = spec.get("name")
@@ -414,12 +489,18 @@ def compute(con: sqlite3.Connection, definition: dict[str, Any]) -> int:
 
             # 범위별로 계산한다. 범위마다 참조 지표 값이 다르다.
             # 지표가 하나도 안 걸린 세션도 포함해야 하므로 sessions 를 기준으로 돈다.
-            scopes = list_scopes(con, scope)
+            # scope: global 은 전역값 하나만 낸다 — 세션마다 돌면 scope='global'
+            # 인데 session_id 가 붙은 행이 생겨 v_metrics_global 에 여러 줄이 뜬다.
+            scopes = list_scopes(con, scope) if scope != "global" else []
+
+            # 참조가 맞는지는 데이터와 상관없이 먼저 본다. 세션이 하나도 없는 DB
+            # 에서도 범위가 틀린 참조는 잡아야 한다. 값이 비어 있으니 결과는 None.
+            FormulaEvaluator({}, declared, scope).eval(expression)
 
             computed = 0
             for session_id, player_id in scopes:
                 values = scope_values(con, scope, session_id, player_id)
-                result = FormulaEvaluator(values, declared, declared_party).eval(expression)
+                result = FormulaEvaluator(values, declared, scope).eval(expression)
                 if result is None:
                     continue
                 con.execute(
@@ -430,7 +511,7 @@ def compute(con: sqlite3.Connection, definition: dict[str, Any]) -> int:
                 computed += 1
 
             # 전역값도 같은 수식으로 계산한다.
-            result = FormulaEvaluator(global_values, declared, declared_party).eval(expression)
+            result = FormulaEvaluator(global_values, declared, "global").eval(expression)
             if result is not None:
                 con.execute(
                     "INSERT INTO metric_results VALUES (?,?,?,?,?,?,?,datetime('now'))",
@@ -439,13 +520,15 @@ def compute(con: sqlite3.Connection, definition: dict[str, Any]) -> int:
                 global_values[name] = result
                 rows_written += 1
 
-            declared.add(name)
-            if scope == "party":
-                declared_party.add(name)
+            declared[name] = (scope, None)
             skipped = len(scopes) - computed
             note = f", 데이터 없어 건너뜀 {skipped}개" if skipped else ""
             label = {"session": "세션", "party": "파티", "global": "전역"}[scope]
-            print(f"  {name} (formula, {label}) — {computed}개{note}")
+            if scope == "global":
+                count = "1개" if result is not None else "값 없음"
+            else:
+                count = f"{computed}개{note}"
+            print(f"  {name} (formula, {label}) — {count}")
             continue
 
         # ------------------------------------------------ 집계 지표
@@ -513,9 +596,26 @@ def compute(con: sqlite3.Connection, definition: dict[str, Any]) -> int:
             global_values[name] = gvalue
             rows_written += 1
 
-        declared.add(name)
-        if scope == "party":
-            declared_party.add(name)
+        # 축별 전역값. 이것도 원본에서 다시 센다 — 세션·플레이어별 avg 를
+        # 더하거나 평균내면 틀린다(README "전역 평균은 세션 평균의 평균이 아니다").
+        # 카드와 --show 가 축별 합계를 낼 때 이 행을 읽는다.
+        if dimension_key:
+            gsql, gparams = build_query(spec, "global")
+            try:
+                grows = con.execute(gsql, gparams).fetchall()
+            except sqlite3.Error as e:
+                raise DefinitionError(f"[{name}] 축별 전역 집계 실패: {e}") from e
+            for dim_value, value in grows:
+                if value is None:
+                    continue
+                con.execute(
+                    "INSERT INTO metric_results VALUES (?,?,?,?,?,?,?,datetime('now'))",
+                    (name, "global", None, None, dimension_key, dim_value or "",
+                     float(value)),
+                )
+                rows_written += 1
+
+        declared[name] = (scope, dimension_key or None)
         dim_note = f", 축 {dimension_key}" if dimension_key else ""
         scope_note = f", {scope}" if scope != "session" else ""
         empty = "  ※ 해당 이벤트가 로그에 없다" if not rows else ""
@@ -535,8 +635,16 @@ def main() -> int:
     if not def_path.exists():
         print(f"[오류] 정의 파일이 없다: {def_path}", file=sys.stderr)
         return 1
-
-    definition = yaml.safe_load(def_path.read_text(encoding="utf-8"))
+    if not pathlib.Path(args.db).exists():
+        # 그대로 열면 빈 DB 가 새로 생기고 "해당 이벤트가 없다" 만 줄줄이 뜬다.
+        print(f"[오류] DB 가 없다: {args.db} — loader.py 로 먼저 적재하라",
+              file=sys.stderr)
+        return 1
+    try:
+        definition = load_definition(def_path)
+    except DefinitionError as e:
+        print(f"[정의 오류] {e}", file=sys.stderr)
+        return 1
     con = connect(args.db)
 
     print(f"지표 계산 — {def_path.name}")
@@ -563,12 +671,12 @@ def main() -> int:
             print(f"  {row[0]:<34} {row[1]:>14,.2f}")
 
         dim_rows = con.execute(
-            "SELECT metric_name, dimension_key, dimension_value, SUM(value)"
-            " FROM metric_results WHERE dimension_key != ''"
-            " GROUP BY 1,2,3 ORDER BY 1, 4 DESC"
+            "SELECT metric_name, dimension_key, dimension_value, value"
+            " FROM metric_results WHERE scope = 'global' AND dimension_key != ''"
+            " ORDER BY 1, 4 DESC"
         ).fetchall()
         if dim_rows:
-            print("\n축별 지표 (전 세션 합)")
+            print("\n축별 지표 (전역 — 원본에서 다시 계산)")
             print("-" * 52)
             for name, dkey, dval, value in dim_rows:
                 print(f"  {name:<24} {dkey}={dval:<8} {value:>10,.2f}")

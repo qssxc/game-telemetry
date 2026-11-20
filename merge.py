@@ -202,7 +202,12 @@ def _event_rules(section: Any, where: str) -> dict[str, EventRule]:
 
 def load_rules(definition: Any) -> Rules:
     """정의 파일(이미 읽은 dict)에서 merge: 섹션을 꺼낸다. 없으면 빈 규칙."""
-    section = (definition or {}).get("merge") if isinstance(definition, dict) else None
+    if definition is not None and not isinstance(definition, dict):
+        # 맨 위가 목록인 파일을 조용히 "규칙 없음" 으로 읽으면, 협동 게임에서
+        # 공유 자원이 부풀려진 채 다음 단계로 넘어간다.
+        raise RulesError("정의 파일의 맨 위는 metrics: · merge: 를 가진 모음이어야 한다 "
+                         f"(지금은 {type(definition).__name__})")
+    section = (definition or {}).get("merge")
     if section is None:
         return Rules()
     if not isinstance(section, dict):
@@ -259,7 +264,11 @@ def load_rules(definition: Any) -> Rules:
 
 def load_rules_file(path: str | pathlib.Path) -> Rules:
     import yaml
-    return load_rules(yaml.safe_load(pathlib.Path(path).read_text(encoding="utf-8")))
+    try:
+        data = yaml.safe_load(pathlib.Path(path).read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        raise RulesError(f"{path} 를 YAML 로 읽지 못했다: {e}") from e
+    return load_rules(data)
 
 
 def load_events(con: sqlite3.Connection, session_id: str) -> dict[str, list[dict]]:
@@ -501,6 +510,11 @@ def main() -> int:
             print(f"[규칙 오류] {e}", file=sys.stderr)
             return 1
 
+    if not pathlib.Path(args.db).exists():
+        # 그대로 열면 빈 DB 가 새로 생기고 "완료" 가 찍힌다.
+        print(f"[오류] DB 가 없다: {args.db} — loader.py 로 먼저 적재하라",
+              file=sys.stderr)
+        return 1
     con = connect(args.db)
     rc = merge(con, rules)
 

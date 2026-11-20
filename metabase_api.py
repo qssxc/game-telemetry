@@ -248,8 +248,11 @@ class Metabase:
             r = r.get("data", [])
         return [c for c in r if isinstance(c, dict)]
 
-    def find_card(self, name: str, collection_id: int | None) -> dict[str, Any] | None:
-        for c in self.cards():
+    def find_card(self, name: str, collection_id: int | None,
+                  known: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+        """known 을 주면 그 목록에서 찾는다. 카드를 여러 장 올릴 때 한 번 받은
+        목록을 넘겨, 카드마다 전체 카드 목록을 다시 받지 않게 한다."""
+        for c in (known if known is not None else self.cards()):
             if c.get("archived"):
                 continue
             if c.get("name") == name and c.get("collection_id") == collection_id:
@@ -267,6 +270,7 @@ class Metabase:
         description: str | None = None,
         preserve_visuals: bool = True,
         choices: dict[str, list[str]] | None = None,
+        known: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], str]:
         """같은 이름의 카드가 있으면 갱신하고, 없으면 만든다.
 
@@ -280,9 +284,11 @@ class Metabase:
         고쳐놨는데 지표를 하나 추가했다고 그게 날아가면, 두 번째부터는
         아무도 이 도구를 돌리지 않는다.
 
+        known — 미리 받아 둔 카드 목록 (find_card 참고).
+
         돌려주는 두 번째 값은 "created" 또는 "updated" 다.
         """
-        existing = self.find_card(name, collection_id)
+        existing = self.find_card(name, collection_id, known)
 
         body = {
             "name": name,
@@ -550,7 +556,12 @@ def main(argv: list[str] | None = None) -> int:
         print("\n--cards 없음 — 지표 정의에서 생성한 카드만 올린다")
 
     if args.from_yaml:
-        gen = cardgen.from_metrics(args.from_yaml)
+        import metrics
+        try:
+            gen = cardgen.from_metrics(args.from_yaml)
+        except metrics.DefinitionError as e:
+            print(f"\n[실패] 정의 파일 — {e}", file=sys.stderr)
+            return 1
         print(f"{os.path.basename(args.from_yaml)} 에서 카드 {len(gen)}개 생성")
         todo.update(gen)
 
@@ -606,9 +617,13 @@ def main(argv: list[str] | None = None) -> int:
     col = mb.ensure_collection(args.collection)
     print(f"\n컬렉션   {col['name']} (id={col['id']})")
 
+    # 카드 목록은 한 번만 받는다. 카드마다 받으면 카드 N장에 전체 목록을 N번
+    # 내려받는다. 이 실행 동안 새로 만드는 카드끼리는 이름이 겹치지 않는다.
+    known = mb.cards()
+
     if args.dry_run:
         for name in checked:
-            state = "갱신" if mb.find_card(name, col["id"]) else "생성"
+            state = "갱신" if mb.find_card(name, col["id"], known) else "생성"
             print(f"  [미실행] {state}  {name}")
         return 0
 
@@ -616,7 +631,8 @@ def main(argv: list[str] | None = None) -> int:
     for name, (sql, display) in checked.items():
         try:
             card, how = mb.upsert_card(name, sql, db["id"], col["id"],
-                                       display=display, choices=choices)
+                                       display=display, choices=choices,
+                                       known=known)
             made[how] += 1
             print(f"  {'생성' if how == 'created' else '갱신'}  "
                   f"{name}   (card id={card['id']})")

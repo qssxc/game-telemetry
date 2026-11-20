@@ -73,6 +73,21 @@ CARRY = ("session_id", "player_id", "seq", "t_ms", "wall_clock", "canonical")
 
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# 자동 생성한 뷰에 남기는 표시. 뷰의 SQL 안(AS 뒤)에 넣어야 sqlite_master 에
+# 함께 저장된다 — CREATE 앞의 주석은 저장되지 않는다. 이 표시가 있는 뷰만
+# "옛 자동 뷰" 로 보고 지운다. 손으로 쓴 뷰에는 없으니 건드리지 않는다.
+MARKER = "/* viewgen */"
+
+
+def quote(ident: str) -> str:
+    """SQL 식별자를 큰따옴표로 감싼다.
+
+    파라미터 이름이 order · group · index · from · to · default 처럼 SQL
+    예약어면 `AS order` 가 문법 오류가 된다. 뷰 생성은 한 트랜잭션이라
+    이벤트 하나 때문에 모든 이벤트의 뷰가 만들어지지 않는다.
+    """
+    return '"' + ident.replace('"', '""') + '"'
+
 
 def event_names(con: sqlite3.Connection) -> list[str]:
     """뷰를 만들 수 있는 이벤트 이름.
@@ -170,14 +185,23 @@ def build_view(event: str, params: list[tuple[str, str]], prefix: str,
 
     원본은 지우지 않는다. 같은 이벤트의 _all 뷰가 걸러지지 않은 전부를 준다.
     """
-    view = f"{prefix}{event}{suffix}"
+    view = quote(f"{prefix}{event}{suffix}")
     cols = [f"    e.{c}" for c in CARRY]
     joins = []
+    # SQLite 의 칼럼 이름은 대소문자를 가리지 않는다. hp 와 HP 가 함께 있으면
+    # 뒤쪽이 "HP:1" 이라는 이상한 이름이 되므로 미리 접미사를 붙인다.
+    used = {c.lower() for c in CARRY}
 
     for i, (key, kind) in enumerate(params):
         alias = f"p{i}"
         label = f"{key}_param" if key in ENVELOPE else key
-        cols.append(f"    {EXPR[kind].format(a=alias):<34} AS {label}")
+        n = 2
+        base = label
+        while label.lower() in used:
+            label = f"{base}_{n}"
+            n += 1
+        used.add(label.lower())
+        cols.append(f"    {EXPR[kind].format(a=alias):<34} AS {quote(label)}")
         joins.append(
             f"LEFT JOIN event_params_merged {alias}\n"
             f"       ON {alias}.session_id = e.session_id\n"
@@ -204,7 +228,7 @@ def build_view(event: str, params: list[tuple[str, str]], prefix: str,
     return (
         head
         + f"DROP VIEW IF EXISTS {view};\n"
-        f"CREATE VIEW {view} AS\n"
+        f"CREATE VIEW {view} AS {MARKER}\n"
         f"{note}SELECT\n" + ",\n".join(cols) + "\n"
         "FROM events e\n"
         + ("".join(j + "\n" for j in joins))
@@ -228,13 +252,19 @@ def covered_events(path: pathlib.Path) -> set[str]:
     return found
 
 
-def generate(con: sqlite3.Connection, skip: set[str],
-             prefix: str = "v_") -> tuple[list[str], list[tuple[str, int, bool]]]:
+def generate(con: sqlite3.Connection, skip: set[str], prefix: str = "v_",
+             ) -> tuple[list[str], list[tuple[str, int, bool]], list[str]]:
     """DB 를 읽어 이벤트별 뷰의 SQL 을 만든다.
 
-    돌려주는 것: (뷰마다 SQL 조각, [(뷰 이름, 파라미터 수, 중복 제거 여부)])
+    돌려주는 것: (SQL 조각들, [(뷰 이름, 파라미터 수, 중복 제거 여부)],
+                  지울 옛 자동 뷰 이름들)
     skip 에 든 이벤트는 건너뛴다 — 손으로 쓴 뷰가 이미 다루는 이벤트다.
     중복 복제가 확인된 이벤트는 걸러진 뷰와 _all 뷰 둘을 만든다.
+
+    이번에 만들지 않는 자동 뷰는 지운다. 이벤트가 로그에서 사라졌거나,
+    중복이 없어져 _all 이 필요 없어졌거나, 손으로 쓴 뷰가 그 이벤트를
+    맡게 된 경우다. 남겨 두면 Metabase 에 같은 데이터를 보는 뷰가 둘 보이거나
+    아무도 갱신하지 않는 뷰가 남는다. MARKER 가 있는 뷰만 지운다.
 
     viewgen.py 와 pipeline.py 가 같이 쓴다.
     """
@@ -256,7 +286,14 @@ def generate(con: sqlite3.Connection, skip: set[str],
             # 제대로 됐는지 확인할 수 있다.
             parts.append(build_view(name, params, prefix, suffix="_all"))
             made.append((f"{prefix}{name}_all", len(params), False))
-    return parts, made
+
+    keep = {v for v, _, _ in made}
+    stale = sorted(
+        name for name, sql in con.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'view'")
+        if sql and MARKER in sql and name not in keep)
+    parts = [f"DROP VIEW IF EXISTS {quote(v)};\n" for v in stale] + parts
+    return parts, made, stale
 
 
 def main() -> int:
@@ -285,7 +322,7 @@ def main() -> int:
 
     con = connect(str(db))
     try:
-        parts, made = generate(con, skip, args.prefix)
+        parts, made, stale = generate(con, skip, args.prefix)
     except sqlite3.Error as e:
         print(f"[오류] DB 를 읽지 못했다: {e}\n"
               f"  event_params_merged 뷰가 필요하다. loader.py 를 먼저 돌려라.",
@@ -305,6 +342,8 @@ def main() -> int:
         print("[오류] 만들 뷰가 없다. 로그를 적재했는지 확인하라.", file=sys.stderr)
         con.close()
         return 1
+    if stale:
+        print(f"더 이상 만들지 않는 옛 자동 뷰 {len(stale)}개를 지운다: {', '.join(stale)}")
 
     header = (
         "-- viewgen.py 가 만든 파일이다. 직접 고치지 말 것 — 다시 생성하면 덮어쓴다.\n"
