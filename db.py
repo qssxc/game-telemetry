@@ -82,6 +82,19 @@ CREATE TABLE IF NOT EXISTS merge_overrides (
     PRIMARY KEY (session_id, player_id, seq, key)
 );
 
+-- 협동 세션의 시간 정렬 내역. merge.py 가 채운다.
+-- events.t_ms 를 기준 플레이어(호스트)의 시간축으로 옮긴 양과, 시계 오차를
+-- 어떻게 정했는지 남긴다. 원본 시각은 events.t_raw_ms 에 그대로 있다.
+CREATE TABLE IF NOT EXISTS clock_alignment (
+    session_id        TEXT NOT NULL,
+    player_id         TEXT NOT NULL,
+    reference_player  TEXT NOT NULL,   -- 시간축의 기준(보통 호스트)
+    clock_offset_ms   REAL,            -- 이 PC 시계가 기준보다 앞선 양
+    shift_ms          INTEGER,         -- t_ms = t_raw_ms + shift_ms (첫 구간)
+    method            TEXT,            -- 기준 | 왕복 쌍 | PC 시계
+    PRIMARY KEY (session_id, player_id)
+);
+
 CREATE TABLE IF NOT EXISTS load_log (
     source_file  TEXT,
     loaded_at    TIMESTAMP,
@@ -119,7 +132,7 @@ CREATE INDEX IF NOT EXISTS ix_events_name
 
 # 우리가 만드는 테이블. --reset 이 지우는 범위이기도 하다.
 # 의존 순서의 역순으로 적는다.
-OUR_TABLES = ("load_log", "metric_results", "merge_overrides",
+OUR_TABLES = ("load_log", "metric_results", "merge_overrides", "clock_alignment",
               "event_params", "events", "sessions")
 
 

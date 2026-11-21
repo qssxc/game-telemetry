@@ -77,7 +77,8 @@ metrics:
 #     event: coins_reason_corrected
 #     target: coins_changed
 #     match: [currency, delta]
-#   clock_pairs:                       # 선택 — merge_check.py 의 시계 오차 측정용
+#   align_time: true                   # 선택 — 기본 true. t_ms 를 호스트 시간축에 맞춘다
+#   clock_pairs:                       # 선택 — 시계 오차 측정용 (시간 정렬, merge_check.py)
 #     - observed: player_downed        #   상대가 관측한 이벤트
 #       who: user_id                   #   거기서 당사자를 가리키는 파라미터
 #       who_format: "p{}"              #   그 값을 player_id 로 바꾸는 틀 (기본 "{}")

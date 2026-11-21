@@ -198,40 +198,19 @@ def report_clock(ev_by_player: dict[str, list[dict]], broadcast: list[str],
     # 한 방향 관측만으로는 둘을 나눌 수 없다. 관측 시각 차이 = 시계 오차 +
     # 전달 지연이고, 미지수가 둘인데 식이 하나이기 때문이다.
     # 양쪽이 서로를 관측한 쌍이 있으면 식이 둘이 되어 풀린다.
+    # 측정은 merge.py 와 같은 함수로 한다. merge.py 가 이 값으로 t_ms 를 맞추므로
+    # 여기서 보이는 오차와 실제로 적용되는 오차가 같아야 한다.
     estimates = []
     for pair in rules.clock_pairs:
         obs_name = pair.observed
         legs = []
         for src, dst in ((a, b), (b, a)):
-            own = sorted((e for e in ev_by_player[src]
-                          if e["name"] == pair.cause and e["wall"]),
-                         key=lambda e: e["wall"])
-            seen = sorted((e for e in ev_by_player[dst]
-                           if e["name"] == obs_name and e["wall"]
-                           and pair.player_of(e) == src),
-                          key=lambda e: e["wall"])
-            if not own or not seen:
-                continue
-            # k 번째 원인을 k 번째 관측과 짝짓는다. "가장 늦은 원인" 이나
-            # "관측 직전의 원인" 으로 고르면 안 된다 — 두 시계가 어긋나 있어
-            # 직전·직후를 가를 기준이 없고, 한 사람이 두 번 죽으면 첫 관측이
-            # 두 번째 죽음과 짝지어져 오차가 수십 초로 튄다.
-            if len(own) != len(seen):
-                print(f"    [주의] {src} 의 {pair.cause} {len(own)}건, "
-                      f"{dst} 가 관측한 {obs_name} {len(seen)}건 — "
-                      f"앞에서부터 {min(len(own), len(seen))}쌍만 쓴다")
-            gaps = [(o["wall"] - c["wall"]).total_seconds()
-                    for c, o in zip(own, seen)]
-            legs.append((src, dst, statistics.median(gaps), len(gaps)))
-
+            got = merge.clock_legs(ev_by_player, src, dst, pair)
+            if got:
+                legs.append((src, dst, got[0], got[1]))
         if len(legs) == 2:
-            # C = b 의 시계가 a 보다 앞선 양, D = 전달 지연
-            #   a → b 관측 (b 시계로 잰 관측 − a 시계로 잰 원인): g_ab = D + C
-            #   b → a 관측 (a 시계로 잰 관측 − b 시계로 잰 원인): g_ba = D − C
-            gap = {(s_, d_): g for s_, d_, g, _ in legs}
-            g_ab, g_ba = gap[(a, b)], gap[(b, a)]
-            offset = (g_ab - g_ba) / 2.0
-            delay = (g_ab + g_ba) / 2.0
+            offset = merge.clock_offset(ev_by_player, a, b, (pair,), warn=False)
+            delay = (legs[0][2] + legs[1][2]) / 2.0
             estimates.append((obs_name, offset, delay, legs))
 
     if estimates:
@@ -244,14 +223,14 @@ def report_clock(ev_by_player: dict[str, list[dict]], broadcast: list[str],
             print(f"    → 전달 지연 약 {delay:.2f}초 (게임 로직 대기 포함)")
             window = max(200, int(abs(offset) * 1000 * 3))
             print(f"    → 권장 중복 제거 시간 창: ±{window}ms")
-            print(f"    → JoinSession 의 hostOffsetMs: {int(offset * 1000)}")
+            print("    → merge.py 가 이 오차를 빼고 t_ms 를 호스트 기준에 맞춘다")
             if abs(offset) > 1.0:
                 print("    → [경고] 시계 오차가 1초를 넘는다. 두 PC 시계를 맞출 것")
     else:
         if not rules.clock_pairs:
             print("    정의 파일에 merge.clock_pairs 가 없다 — 시계 오차를 재려면 적는다.")
         print("    서로를 관측한 왕복 쌍이 없어 시계 오차를 분리할 수 없다.")
-        print("    → 병합은 wall_clock 정렬로만 한다.")
+        print("    → merge.py 는 PC 시계를 그대로 믿고 t_ms 를 맞춘다 (오차 0 으로 본다).")
 
     # --- 한 방향 관측은 참고로만 ---------------------------------------
     if not broadcast:

@@ -9,6 +9,7 @@
 
   1. 사유 보정 — resource_reason_corrected 가 가리키는 행에 실제 사유를 붙인다
   2. 중복 판정 — 같은 사건의 여러 복사본 중 하나만 canonical 로 남긴다
+  3. 시간 정렬 — 참가자들의 t_ms 를 호스트의 시간축에 맞춘다 (끄려면 align_time: false)
 
 **원본은 지우지 않는다.** events.canonical 을 0 으로 내릴 뿐이다. 클라이언트별
 관측 시각 자체가 데이터이기 때문이다(체감 지연 측정에 쓴다). 파티 단위 집계는
@@ -30,7 +31,8 @@ canonical = 1 만 보면 되고, 클라이언트별 분석은 전부 보면 된�
         event: resource_reason_corrected
         target: resource_changed
         match: [resource_id, delta]
-      clock_pairs:                       # 선택. merge_check.py 의 시계 오차 측정용
+      align_time: true                   # 선택. 기본 true — 아래 "3. 시간 정렬"
+      clock_pairs:                       # 선택. 시계 오차 측정용 (정렬과 merge_check.py)
         - observed: player_downed        #   상대가 관측한 이벤트
           who: user_id                   #   거기서 당사자를 가리키는 파라미터
           who_format: "p{}"              #   그 값을 player_id 로 바꾸는 틀 (기본 "{}")
@@ -46,7 +48,9 @@ canonical = 1 만 보면 되고, 클라이언트별 분석은 전부 보면 된�
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import pathlib
+import statistics
 import sqlite3
 import sys
 from collections import defaultdict
@@ -131,6 +135,9 @@ class Rules:
     broadcast: dict[str, EventRule] = field(default_factory=dict)
     reason_correction: ReasonCorrection | None = None
     clock_pairs: tuple[ClockPair, ...] = ()
+    # 협동 세션의 t_ms 를 호스트 시간축에 맞출지. 기본으로 켠다 — 맞추지 않은
+    # t_ms 는 플레이어마다 자기 접속 시점이 0 이라 서로 비교할 수 없다.
+    align_time: bool = True
 
     @property
     def empty(self) -> bool:
@@ -213,7 +220,10 @@ def load_rules(definition: Any) -> Rules:
     if not isinstance(section, dict):
         raise RulesError("merge 는 shared_state · broadcast · reason_correction 의 모음이어야 한다")
     _unknown_keys(section, {"shared_state", "broadcast", "reason_correction",
-                            "clock_pairs"}, "merge")
+                            "clock_pairs", "align_time"}, "merge")
+    align_time = section.get("align_time", True)
+    if not isinstance(align_time, bool):
+        raise RulesError(f"merge.align_time 은 true 나 false 여야 한다: {align_time!r}")
 
     shared = _event_rules(section.get("shared_state"), "merge.shared_state")
     broadcast = _event_rules(section.get("broadcast"), "merge.broadcast")
@@ -259,7 +269,7 @@ def load_rules(definition: Any) -> Rules:
             raise RulesError(f"{at}.who_format 은 '{{}}' 가 한 번 들어간 틀이어야 한다: {fmt!r}")
         pairs.append(ClockPair(str(cp["observed"]), str(cp["who"]), str(cp["cause"]), fmt))
 
-    return Rules(shared, broadcast, correction, tuple(pairs))
+    return Rules(shared, broadcast, correction, tuple(pairs), align_time)
 
 
 def load_rules_file(path: str | pathlib.Path) -> Rules:
@@ -286,12 +296,12 @@ def load_events(con: sqlite3.Connection, session_id: str) -> dict[str, list[dict
             num if num is not None else text)
 
     out: dict[str, list[dict]] = defaultdict(list)
-    for pid, seq, t_ms, wall, name in con.execute(
-        "SELECT player_id, seq, t_ms, wall_clock, name FROM events"
+    for pid, seq, t_ms, t_raw, wall, name in con.execute(
+        "SELECT player_id, seq, t_ms, t_raw_ms, wall_clock, name FROM events"
         " WHERE session_id = ? ORDER BY player_id, seq",
         (session_id,),
     ):
-        out[pid].append({"player_id": pid, "seq": seq, "t_ms": t_ms,
+        out[pid].append({"player_id": pid, "seq": seq, "t_ms": t_ms, "t_raw": t_raw,
                          "wall": wall, "name": name,
                          "params": params.get((pid, seq), {})})
     return out
@@ -431,6 +441,162 @@ def dedup_session(con, session_id: str, ev_by_player: dict[str, list[dict]],
     return stats
 
 
+# ------------------------------------------------------------ 3. 시간 정렬
+#
+# t_ms 는 각 클라이언트가 **자기 세션을 시작한 순간부터** 잰 시간이다. 호스트가
+# 0초에 시작하고 클라이언트가 30초 늦게 들어오면, 같은 순간이 호스트 쪽에서는
+# 40000, 클라이언트 쪽에서는 10000 이다. 두 PC 의 시계 오차만 알아서는 맞출 수
+# 없고 "호스트 기준으로 언제 시작했는가" 도 알아야 한다.
+#
+# 그 둘을 wall_clock 에서 얻는다. 이벤트마다 (wall_clock − t_raw_ms) 는 그
+# 클라이언트가 시작한 시각(그 PC 의 시계로)이다. 여기서 시계 오차를 빼면 호스트
+# 시계로 잰 시작 시각이 되고, 호스트의 시작 시각과의 차이만큼 t_ms 를 옮긴다.
+#
+#   t_ms = t_raw_ms + (그 참가자의 시작 − 시계 오차) − 호스트의 시작
+#
+# 시계 오차는 정의 파일의 clock_pairs(서로를 관측한 사건)가 있으면 그것으로 재고,
+# 없으면 0 으로 본다 — PC 시계를 그대로 믿는다. 어느 쪽이었는지는 clock_alignment
+# 테이블에 남긴다.
+#
+# 원본 t_raw_ms 는 건드리지 않는다. 몇 번을 다시 돌려도 t_raw_ms 에서 다시 계산한다.
+
+def _wall_ms(value: Any) -> float | None:
+    """wall_clock(문자열 또는 datetime)을 epoch 밀리초로. 못 읽으면 None."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, dt.datetime):
+        moment = value
+    else:
+        try:
+            moment = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    return moment.timestamp() * 1000.0
+
+
+def clock_legs(ev_by_player: dict[str, list[dict]], src: str, dst: str,
+               pair: ClockPair, warn: bool = True) -> tuple[float, int] | None:
+    """src 에게 일어난 사건(cause)을 dst 가 관측(observed)하기까지의 시각 차이(초).
+
+    두 시계로 잰 값의 차이라 (전달 지연 + dst 시계가 앞선 양) 이다.
+    돌려주는 것: (쌍들의 중앙값, 쌍 수). 쌍이 없으면 None.
+
+    k 번째 원인을 k 번째 관측과 짝짓는다. "가장 늦은 원인" 이나 "관측 직전의
+    원인" 으로 고르면 안 된다 — 두 시계가 어긋나 있어 직전·직후를 가를 기준이
+    없고, 한 사람이 두 번 죽으면 첫 관측이 두 번째 죽음과 짝지어져 오차가 수십
+    초로 튄다.
+    """
+    def moments(events, keep):
+        out = []
+        for e in events:
+            if keep(e):
+                w = _wall_ms(e["wall"])
+                if w is not None:
+                    out.append(w)
+        return sorted(out)
+
+    own = moments(ev_by_player.get(src, []), lambda e: e["name"] == pair.cause)
+    seen = moments(ev_by_player.get(dst, []),
+                   lambda e: e["name"] == pair.observed and pair.player_of(e) == src)
+    if not own or not seen:
+        return None
+    if warn and len(own) != len(seen):
+        print(f"    [주의] {src} 의 {pair.cause} {len(own)}건, "
+              f"{dst} 가 관측한 {pair.observed} {len(seen)}건 — "
+              f"앞에서부터 {min(len(own), len(seen))}쌍만 쓴다")
+    gaps = [(o - c) / 1000.0 for c, o in zip(own, seen)]
+    return statistics.median(gaps), len(gaps)
+
+
+def clock_offset(ev_by_player: dict[str, list[dict]], ref: str, other: str,
+                 pairs: tuple[ClockPair, ...], warn: bool = True) -> float | None:
+    """other 의 시계가 ref 보다 앞선 양(초). 잴 수 없으면 None.
+
+    C = other 가 앞선 양, D = 전달 지연이라 하면
+        ref → other 관측:  g1 = D + C
+        other → ref 관측:  g2 = D − C
+    이므로 C = (g1 − g2) / 2. 한 방향만 있으면 D 와 C 를 가를 수 없어 쓰지 않는다.
+    clock_pairs 가 여럿이면 각각의 추정값의 중앙값을 쓴다.
+    """
+    estimates = []
+    for pair in pairs:
+        g1 = clock_legs(ev_by_player, ref, other, pair, warn)
+        g2 = clock_legs(ev_by_player, other, ref, pair, warn)
+        if g1 and g2:
+            estimates.append((g1[0] - g2[0]) / 2.0)
+    return statistics.median(estimates) if estimates else None
+
+
+def _segment_starts(events: list[dict]) -> list[tuple[int, float | None]]:
+    """이벤트마다 (구간 번호, 그 구간의 시작 시각 ms) — 그 PC 의 시계로.
+
+    재접속하면 옛 SDK 는 t_raw_ms 를 0 부터 다시 센다. 그래서 t_raw_ms 가 줄어드는
+    곳에서 구간을 나누고, 구간마다 시작 시각을 따로 잰다. 시작 시각은 구간 안
+    이벤트들의 (wall_clock − t_raw_ms) 중앙값이다 — wall_clock 이 초 단위로만
+    찍히는 로그에서도 한 이벤트의 반올림에 끌려가지 않는다.
+    """
+    seg_of, starts, current, prev = [], {}, 0, None
+    samples: dict[int, list[float]] = defaultdict(list)
+    for e in events:
+        t = e["t_raw"]
+        if t is not None and prev is not None and t < prev:
+            current += 1
+        if t is not None:
+            prev = t
+            w = _wall_ms(e["wall"])
+            if w is not None:
+                samples[current].append(w - t)
+        seg_of.append(current)
+    for seg, values in samples.items():
+        starts[seg] = statistics.median(values)
+    return [(seg, starts.get(seg)) for seg in seg_of]
+
+
+def align_session(con, session_id: str, ev_by_player: dict[str, list[dict]],
+                  host: str | None, rules: Rules) -> dict[str, tuple[float, str]]:
+    """세션의 t_ms 를 호스트 시간축으로 맞춘다. {플레이어: (옮긴 ms, 방법)}"""
+    ref = host if host in ev_by_player else min(ev_by_player)
+    ref_starts = [s for _, s in _segment_starts(ev_by_player[ref]) if s is not None]
+    if not ref_starts:
+        print(f"    [건너뜀] {session_id}: 기준 플레이어 {ref} 의 wall_clock 을 읽을 수 없어 "
+              f"시간을 맞추지 않는다")
+        return {}
+    ref_start = ref_starts[0]          # 호스트가 처음 시작한 시각이 0 이다
+
+    result: dict[str, tuple[float, str]] = {}
+    updates = []
+    for pid, events in ev_by_player.items():
+        if pid == ref:
+            offset_s, method = 0.0, "기준"
+        else:
+            measured = clock_offset(ev_by_player, ref, pid, rules.clock_pairs)
+            offset_s, method = (measured, "왕복 쌍") if measured is not None else (0.0, "PC 시계")
+
+        first_shift = None
+        for e, (_, start) in zip(events, _segment_starts(events)):
+            if e["t_raw"] is None or start is None:
+                continue        # 시각을 읽을 수 없는 행은 그대로 둔다
+            shift = start - offset_s * 1000.0 - ref_start
+            aligned = int(round(e["t_raw"] + shift))
+            if first_shift is None:
+                first_shift = shift
+            updates.append((aligned, session_id, pid, e["seq"]))
+            e["t_ms"] = aligned
+        if first_shift is None:
+            continue
+        result[pid] = (first_shift, method)
+        con.execute(
+            "INSERT OR REPLACE INTO clock_alignment VALUES (?,?,?,?,?,?)",
+            (session_id, pid, ref, round(offset_s * 1000.0, 1), int(round(first_shift)), method))
+
+    con.executemany(
+        "UPDATE events SET t_ms = ? WHERE session_id = ? AND player_id = ? AND seq = ?",
+        updates)
+    return result
+
+
 # ------------------------------------------------------------------- 실행
 
 def merge(con: sqlite3.Connection, rules: Rules | None = None) -> int:
@@ -440,6 +606,11 @@ def merge(con: sqlite3.Connection, rules: Rules | None = None) -> int:
     # 다시 돌려도 같은 결과가 나오도록 판정을 초기화한다.
     con.execute("UPDATE events SET canonical = 1, dup_group = NULL")
     con.execute("DELETE FROM merge_overrides")
+    # 시간도 원본으로 되돌린 뒤 다시 맞춘다. t_raw_ms 가 없는 로그(이 SDK 가 아닌
+    # 곳에서 온 것)는 처음 돌 때의 t_ms 를 원본으로 삼아 t_raw_ms 에 옮겨 둔다.
+    con.execute("UPDATE events SET t_raw_ms = t_ms WHERE t_raw_ms IS NULL")
+    con.execute("UPDATE events SET t_ms = t_raw_ms")
+    con.execute("DELETE FROM clock_alignment")
 
     sessions: dict[str, list[str]] = defaultdict(list)
     hosts: dict[str, str] = {}
@@ -459,7 +630,7 @@ def merge(con: sqlite3.Connection, rules: Rules | None = None) -> int:
               f"참가자마다 복제되는 이벤트가 있다면 합계가 부풀려진다 — "
               f"정의 파일에 merge: 섹션을 적어라 (README 참고)")
 
-    total = {"corrections": 0, "groups": 0, "duplicates": 0, "mismatched": 0}
+    total = {"corrections": 0, "groups": 0, "duplicates": 0, "mismatched": 0, "aligned": 0}
 
     for sid, players in sessions.items():
         ev = load_events(con, sid)
@@ -476,9 +647,15 @@ def merge(con: sqlite3.Connection, rules: Rules | None = None) -> int:
         for k in ("groups", "duplicates", "mismatched"):
             total[k] += stats[k]
 
+        aligned = align_session(con, sid, ev, hosts.get(sid), rules) if rules.align_time else {}
+        shifts = ", ".join(f"{p} {s / 1000:+.2f}초({how})"
+                           for p, (s, how) in sorted(aligned.items()) if how != "기준")
         print(f"  {sid}: 참가자 {len(players)}명 — "
               f"사유 보정 {corrections}건, 중복 그룹 {stats['groups']}개, "
-              f"제외 {stats['duplicates']}행")
+              f"제외 {stats['duplicates']}행"
+              + (f", 시간 정렬 {shifts}" if shifts else ""))
+        if aligned:
+            total["aligned"] += 1
 
     con.commit()
 
@@ -486,6 +663,9 @@ def merge(con: sqlite3.Connection, rules: Rules | None = None) -> int:
           f"중복 그룹 {total['groups']}개, canonical 에서 제외 {total['duplicates']}행")
     if total["mismatched"]:
         print(f"       관측 수가 어긋난 사건 {total['mismatched']}건 (위 [주의] 참조)")
+    if total["aligned"]:
+        print(f"       시간 정렬 {total['aligned']}개 세션 — t_ms 를 호스트 기준으로 맞췄다 "
+              f"(원본은 t_raw_ms, 내역은 clock_alignment)")
     return 0
 
 
