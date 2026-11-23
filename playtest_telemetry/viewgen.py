@@ -24,9 +24,9 @@ INTEGER 로 자르면 안 되고, turn_count 는 잘라야 읽기 좋다. 데이
 
 무엇을 못 하는가
 --------------
-계산이 들어간 뷰는 못 만든다. 누적 잔액(예: games/example 의 v_coin_ledger),
+계산이 들어간 뷰는 못 만든다. 누적 잔액(예: ptel init 이 만드는 views.sql 의 v_coin_ledger),
 두 이벤트를 한 축으로 묶기 같은 것은 사람이 무엇을 보고 싶은지 정해야
-나온다. 그런 뷰는 games/<게임>/views.sql 에
+나온다. 그런 뷰는 <게임 폴더>/views.sql 에
 손으로 쓰고, 여기서는 --skip-existing 으로 건너뛴다.
 
 merge.py 뒤에 돌려야 한다
@@ -47,7 +47,7 @@ merge.py 뒤에 돌려야 한다
 
 사용법
 -----
-    python viewgen.py --db playtest.sqlite --skip-existing games/mygame/views.sql --apply --no-file
+    python -m playtest_telemetry.viewgen --db playtest.sqlite --skip-existing mygame/views.sql --apply --no-file
 
 PowerShell 에서도 리다이렉션 없이 쓸 수 있게 --out 과 --apply 를 둔다.
 """
@@ -60,7 +60,7 @@ import re
 import sqlite3
 import sys
 
-from db import connect, run_atomically
+from .db import connect, run_atomically
 
 # events 테이블이 이미 들고 있는 칼럼. 파라미터 이름이 이것과 겹치면
 # 칼럼 이름이 충돌하므로 접미사를 붙인다.
@@ -296,8 +296,9 @@ def generate(con: sqlite3.Connection, skip: set[str], prefix: str = "v_",
     return parts, made, stale
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
+        prog="python -m playtest_telemetry.viewgen",
         description="이벤트마다 조회용 뷰를 만들어 낸다")
     ap.add_argument("--db", default="playtest.sqlite")
     ap.add_argument("--out", default="views_generated.sql",
@@ -308,7 +309,7 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true",
                     help="파일로 쓰는 대신(또는 함께) DB 에 바로 반영한다")
     ap.add_argument("--no-file", action="store_true", help="파일을 쓰지 않는다")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     db = pathlib.Path(args.db)
     if not db.exists():
@@ -325,7 +326,7 @@ def main() -> int:
         parts, made, stale = generate(con, skip, args.prefix)
     except sqlite3.Error as e:
         print(f"[오류] DB 를 읽지 못했다: {e}\n"
-              f"  event_params_merged 뷰가 필요하다. loader.py 를 먼저 돌려라.",
+              f"  event_params_merged 뷰가 필요하다. ptel run 으로 먼저 적재하라.",
               file=sys.stderr)
         con.close()
         return 1
@@ -336,7 +337,7 @@ def main() -> int:
               f"{', '.join(deduped)}")
     else:
         print("중복 복제된 행이 없다 — 필터 없이 만든다. "
-              "(협동 세션을 적재하고 merge.py 를 돌린 뒤 다시 생성하면 필터가 붙는다)")
+              "(협동 세션을 적재하고 병합을 돌린 뒤 다시 생성하면 필터가 붙는다)")
 
     if not made:
         print("[오류] 만들 뷰가 없다. 로그를 적재했는지 확인하라.", file=sys.stderr)

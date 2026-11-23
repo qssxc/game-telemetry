@@ -1,0 +1,14 @@
+{
+    "name": "Playtest.Telemetry",
+    "rootNamespace": "Playtest.Telemetry",
+    "references": [],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

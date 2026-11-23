@@ -1,0 +1,27 @@
+{
+  "name": "com.qssxc.playtest-telemetry",
+  "version": "0.1.0",
+  "displayName": "Playtest Telemetry",
+  "description": "플레이테스트에서 일어난 사건을 NDJSON 로그 파일로 남기는 수집기. 분석은 같은 저장소의 ptel 분석 도구로 한다.",
+  "unity": "2021.3",
+  "license": "MIT",
+  "keywords": [
+    "telemetry",
+    "playtest",
+    "analytics"
+  ],
+  "author": {
+    "name": "qssxc",
+    "url": "https://github.com/qssxc/game-telemetry"
+  },
+  "documentationUrl": "https://github.com/qssxc/game-telemetry",
+  "changelogUrl": "https://github.com/qssxc/game-telemetry/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/qssxc/game-telemetry/blob/main/LICENSE",
+  "samples": [
+    {
+      "displayName": "Smoke Test",
+      "description": "빈 씬의 게임오브젝트에 붙여 기록·리소스·부하 테스트·세션 종료를 버튼으로 확인한다.",
+      "path": "Samples~/SmokeTest"
+    }
+  ]
+}

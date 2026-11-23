@@ -26,22 +26,22 @@
 
 게임 폴더
 --------
-게임마다 다른 것은 폴더 하나에 모은다. 이 파일을 포함해 저장소 맨 위의
-파이썬 파일은 어느 게임도 모른다.
+게임마다 다른 것은 폴더 하나에 모은다. 이 패키지의 파이썬 파일은 어느 게임도
+모른다. 폴더의 틀은 `ptel init <폴더>` 가 만든다.
 
-    games/<게임>/
+    <게임 폴더>/
         game.yaml    필수. 지표 정의 + (협동 게임이면) merge 규칙
         views.sql    선택. 손으로 쓴 게임 전용 뷰
         cards.py     선택. 손으로 쓴 Metabase 카드
 
-games/example/ 를 복사해서 시작한다.
-
 사용법
 -----
-    python pipeline.py <로그폴더> --game games/mygame
-    python pipeline.py <로그폴더> --game games/mygame --reset --push
-    python pipeline.py --game games/mygame --skip-load    # 로그는 그대로, 뒷단계만 다시
-    python pipeline.py <로그폴더> --yaml mygame.yaml       # 정의 파일 하나만으로
+보통은 `ptel run` 으로 부른다(cli.py). 이 모듈을 직접 돌려도 같다.
+
+    ptel run <로그폴더> --game mygame
+    ptel run <로그폴더> --game mygame --reset --push
+    ptel run --game mygame --skip-load          # 로그는 그대로, 뒷단계만 다시
+    ptel run <로그폴더> --yaml mygame.yaml       # 정의 파일 하나만으로
 """
 
 from __future__ import annotations
@@ -53,9 +53,10 @@ import pathlib
 import sqlite3
 import sys
 import time
+from dataclasses import dataclass
 
-HERE = pathlib.Path(__file__).parent
-sys.path.insert(0, str(HERE))
+# 이 패키지에 함께 들어 있는 기본 뷰. 어느 게임에나 똑같은 뷰만 있다.
+BASE_VIEWS = pathlib.Path(__file__).parent / "views.sql"
 
 
 class StepFailed(Exception):
@@ -91,7 +92,7 @@ def run_step(n: int, total: int, title: str, fn, verbose: bool) -> None:
 
 def do_load(con, log_dir: pathlib.Path, reset: bool, views: pathlib.Path,
             game_views: pathlib.Path | None) -> str:
-    import loader
+    from . import loader
     files = sorted(log_dir.glob("*.ndjson"))
     if not files:
         raise StepFailed(f"{log_dir} 에 .ndjson 파일이 없다")
@@ -109,14 +110,14 @@ def do_load(con, log_dir: pathlib.Path, reset: bool, views: pathlib.Path,
 
 
 def do_merge(con, yaml_path: pathlib.Path) -> str:
-    import merge
+    from . import merge
     # 판정 규칙은 정의 파일의 merge: 섹션에 있다. 파일이 없으면 여기서 멈춘다 —
     # 어차피 지표 단계에서 멈출 텐데, 규칙 없이 병합부터 해버리면 그 사이에
     # 부풀려진 숫자가 보인다.
     if not yaml_path.exists():
         raise StepFailed(
             f"정의 파일이 없다: {yaml_path}\n"
-            f"  games/example/ 를 복사해 고친 뒤 --game 으로 그 폴더를 지정하라")
+            f"  ptel init <폴더> 로 게임 폴더를 만든 뒤 --game 으로 지정하라")
     try:
         rules = merge.load_rules_file(yaml_path)
     except merge.RulesError as e:
@@ -132,8 +133,8 @@ def do_merge(con, yaml_path: pathlib.Path) -> str:
 
 
 def do_viewgen(con, game_views: pathlib.Path | None, prefix: str) -> str:
-    import db
-    import viewgen
+    from . import db
+    from . import viewgen
     # 게임 뷰가 손으로 다루는 이벤트는 건너뛴다. 기본 뷰에는 이벤트 이름이 없다.
     skip = viewgen.covered_events(game_views) if game_views else set()
     parts, made, stale = viewgen.generate(con, skip, prefix)
@@ -154,7 +155,7 @@ def do_viewgen(con, game_views: pathlib.Path | None, prefix: str) -> str:
 
 
 def do_metrics(con, yaml_path: pathlib.Path) -> str:
-    import metrics
+    from . import metrics
     if not yaml_path.exists():
         raise StepFailed(f"지표 정의 파일이 없다: {yaml_path}")
     try:
@@ -169,66 +170,114 @@ def do_metrics(con, yaml_path: pathlib.Path) -> str:
     return f"metric_results {written}행"
 
 
-def do_push(db_path: pathlib.Path, yaml_path: pathlib.Path, collection: str,
-            cards: pathlib.Path | None) -> str:
-    import metabase_api
+def push_cards(db_path: pathlib.Path, game: "Game", collection: str,
+               dry_run: bool = False) -> int:
+    """Metabase 카드를 만들거나 갱신한다. `ptel run --push` 와 `ptel push` 가 같이 쓴다."""
+    from . import metabase_api
     argv = ["--db-file", str(db_path), "--push",
-            "--from-yaml", str(yaml_path), "--collection", collection]
-    if cards is not None:
-        argv += ["--cards", str(cards)]
-    rc = metabase_api.main(argv)
-    if rc != 0:
+            "--from-yaml", str(game.yaml), "--collection", collection]
+    if game.cards is not None:
+        argv += ["--cards", str(game.cards)]
+    if dry_run:
+        argv.append("--dry-run")
+    return metabase_api.main(argv)
+
+
+def do_push(db_path: pathlib.Path, game: "Game", collection: str) -> str:
+    if push_cards(db_path, game, collection) != 0:
         raise StepFailed("Metabase 반영 실패 — 위 메시지를 보라")
     return "카드 반영 완료"
 
 
+# ------------------------------------------------------------------ 게임 폴더
+
+class GameError(Exception):
+    """게임 폴더나 정의 파일을 찾지 못했다. 메시지는 그대로 사용자에게 보인다."""
+
+
+@dataclass(frozen=True)
+class Game:
+    yaml: pathlib.Path                  # 정의 파일 (필수)
+    views: pathlib.Path | None = None   # 손으로 쓴 뷰 (선택)
+    cards: pathlib.Path | None = None   # 손으로 쓴 카드 (선택)
+
+
+def resolve_game(game: str | None, yaml: str | None) -> Game:
+    """--game 과 --yaml 로 이번에 쓸 파일들을 정한다. run · check · push 가 같이 쓴다.
+
+    --yaml 을 주면 정의 파일은 그것이고, --game 이 같이 있으면 views.sql ·
+    cards.py 는 그 폴더에서 찾는다.
+    """
+    views = cards = None
+    if game:
+        folder = pathlib.Path(game)
+        if not folder.is_dir():
+            raise GameError(f"게임 폴더가 없다: {folder}\n"
+                            f"  ptel init {folder} 로 만든다")
+        if (folder / "views.sql").exists():
+            views = folder / "views.sql"
+        if (folder / "cards.py").exists():
+            cards = folder / "cards.py"
+    if yaml:
+        yml = pathlib.Path(yaml)
+    elif game:
+        yml = pathlib.Path(game) / "game.yaml"
+    else:
+        raise GameError("어느 게임인지 지정하라: --game <게임 폴더> (또는 --yaml <정의 파일>)\n"
+                        "  게임 폴더가 없으면 ptel init <폴더> 로 만든다")
+    if not yml.exists():
+        raise GameError(f"정의 파일이 없다: {yml}\n"
+                        f"  ptel init <폴더> 로 틀을 만든 뒤 고친다")
+    return Game(yml, views, cards)
+
+
 # ------------------------------------------------------------------ CLI
 
-def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="적재 → 병합 → 뷰 → 지표 (→ Metabase) 를 한 번에 돌린다")
-    ap.add_argument("log_dir", nargs="?", help="*.ndjson 이 들어있는 폴더")
-    ap.add_argument("--db", default="playtest.sqlite")
+def add_run_arguments(ap: argparse.ArgumentParser) -> None:
+    """`ptel run` 의 옵션. cli.py 도 이 함수로 같은 옵션을 단다."""
+    ap.add_argument("log_dir", nargs="?", metavar="로그폴더",
+                    help="*.ndjson 이 들어 있는 폴더 (--skip-load 면 생략)")
     ap.add_argument("--game", default=None, metavar="폴더",
                     help="게임 폴더. game.yaml 과 (있으면) views.sql · cards.py 를 "
-                         "여기서 읽는다 (예: games/mygame)")
-    ap.add_argument("--yaml", default=None,
-                    help="정의 파일. --game 의 game.yaml 대신 이것을 쓴다")
-    ap.add_argument("--views", default=None, help="기본 뷰 (기본: views.sql)")
+                         "여기서 읽는다 (필수, 또는 --yaml)")
+    ap.add_argument("--yaml", default=None, metavar="파일",
+                    help="게임 폴더 없이 정의 파일 하나만으로 돌릴 때")
+    ap.add_argument("--db", default="playtest.sqlite", metavar="파일",
+                    help="결과 DB 파일 (기본: playtest.sqlite)")
     ap.add_argument("--reset", action="store_true",
-                    help="기존 내용을 비우고 새로 적재한다 (DB 파일은 유지한다)")
+                    help="기존 내용을 비우고 새로 적재한다 (DB 파일은 지우지 않는다)")
     ap.add_argument("--skip-load", action="store_true",
-                    help="적재를 건너뛴다. 이미 적재된 DB 로 뒷단계만 다시 돌릴 때")
-    ap.add_argument("--push", action="store_true", help="Metabase 카드까지 반영한다")
-    ap.add_argument("--collection", default="플레이테스트 지표")
-    ap.add_argument("--prefix", default="v_")
+                    help="적재를 건너뛴다. 지표 정의만 고쳤을 때")
+    ap.add_argument("--push", action="store_true",
+                    help="끝난 뒤 Metabase 카드를 반영한다")
+    ap.add_argument("--collection", default="플레이테스트 지표", metavar="이름",
+                    help="카드를 담을 Metabase 컬렉션 (기본: 플레이테스트 지표)")
     ap.add_argument("-v", "--verbose", action="store_true",
-                    help="각 단계의 상세 출력을 전부 보여준다")
-    args = ap.parse_args()
+                    help="각 단계의 상세 출력을 모두 보여준다")
+    # 가이드에 없는 고급 옵션. 기본값이면 충분하다.
+    ap.add_argument("--views", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--prefix", default="v_", help=argparse.SUPPRESS)
 
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="python -m playtest_telemetry.pipeline",
+        description="적재 → 병합 → 뷰 → 지표 (→ Metabase) 를 한 번에 돌린다")
+    add_run_arguments(ap)
+    return run(ap.parse_args(argv))
+
+
+def run(args: argparse.Namespace) -> int:
     db_path = pathlib.Path(args.db)
-    views = pathlib.Path(args.views) if args.views else HERE / "views.sql"
+    views = pathlib.Path(args.views) if args.views else BASE_VIEWS
 
     # 게임마다 다른 것은 전부 게임 폴더에서 온다.
-    game_views = cards = None
-    if args.game:
-        game = pathlib.Path(args.game)
-        if not game.is_dir():
-            print(f"[오류] 게임 폴더가 없다: {game}\n"
-                  f"  games/example/ 를 복사해서 시작하라", file=sys.stderr)
-            return 1
-        if (game / "views.sql").exists():
-            game_views = game / "views.sql"
-        if (game / "cards.py").exists():
-            cards = game / "cards.py"
-    if args.yaml:
-        yml = pathlib.Path(args.yaml)
-    elif args.game:
-        yml = pathlib.Path(args.game) / "game.yaml"
-    else:
-        print("[오류] 어느 게임인지 지정하라: --game <게임 폴더> (또는 --yaml <정의 파일>)\n"
-              "  games/example/ 를 복사해서 시작하라", file=sys.stderr)
+    try:
+        game = resolve_game(args.game, args.yaml)
+    except GameError as e:
+        print(f"[오류] {e}", file=sys.stderr)
         return 1
+    yml, game_views = game.yaml, game.views
 
     if not args.skip_load and not args.log_dir:
         print("[오류] 로그 폴더를 지정하라 (또는 --skip-load)", file=sys.stderr)
@@ -237,7 +286,7 @@ def main() -> int:
         print(f"[오류] --skip-load 인데 DB 가 없다: {db_path}", file=sys.stderr)
         return 1
 
-    import db
+    from . import db
     con = db.connect(str(db_path), fast=True)
     total = 5 if args.push else 4
     started = time.monotonic()
@@ -250,7 +299,7 @@ def main() -> int:
             # 뷰는 다시 적용한다. 게임 views.sql 을 고쳤다면 그 뷰가 다루는 이벤트의
             # 자동 뷰를 이벤트 뷰 단계가 지우는데, 손으로 쓴 새 뷰가 아직 없으면
             # 그 이벤트를 볼 뷰가 하나도 없게 된다. 한 트랜잭션이라 비용도 작다.
-            import loader
+            from . import loader
             if not loader.apply_views(con, views, game_views):
                 raise StepFailed("뷰 적용 실패 — 위 메시지를 보라")
         else:
@@ -276,7 +325,7 @@ def main() -> int:
         if args.push:
             n += 1
             run_step(n, total, "Metabase 카드 반영",
-                     lambda: do_push(db_path, yml, args.collection, cards), args.verbose)
+                     lambda: do_push(db_path, game, args.collection), args.verbose)
 
     except StepFailed as e:
         print(f"\n[중단] {e}", file=sys.stderr)

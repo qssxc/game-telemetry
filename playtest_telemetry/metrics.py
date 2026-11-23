@@ -19,7 +19,7 @@
 
 사용법
 ------
-    python metrics.py <정의파일.yaml> [--db playtest.sqlite] [--show]
+    python -m playtest_telemetry.metrics <정의파일.yaml> [--db playtest.sqlite] [--show]
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-from db import SCHEMA, connect
+from .db import SCHEMA, connect
 
 
 AGGREGATES = {
@@ -624,12 +624,14 @@ def compute(con: sqlite3.Connection, definition: dict[str, Any]) -> int:
     return rows_written
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="정의 파일로 파생지표를 계산한다")
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="python -m playtest_telemetry.metrics",
+        description="정의 파일로 파생지표를 계산한다")
     ap.add_argument("definition", help="지표 정의 YAML")
     ap.add_argument("--db", default="playtest.sqlite")
     ap.add_argument("--show", action="store_true", help="계산 결과를 출력한다")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     def_path = pathlib.Path(args.definition)
     if not def_path.exists():
@@ -637,7 +639,7 @@ def main() -> int:
         return 1
     if not pathlib.Path(args.db).exists():
         # 그대로 열면 빈 DB 가 새로 생기고 "해당 이벤트가 없다" 만 줄줄이 뜬다.
-        print(f"[오류] DB 가 없다: {args.db} — loader.py 로 먼저 적재하라",
+        print(f"[오류] DB 가 없다: {args.db} — ptel run 으로 먼저 적재하라",
               file=sys.stderr)
         return 1
     try:

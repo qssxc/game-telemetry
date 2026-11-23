@@ -1,17 +1,13 @@
-# 게임 정의 파일의 틀.
-#
-#   games/example/ 폴더를 통째로 복사해서 자기 게임에 맞게 고친다.
-#
-#       cp -r games/example games/mygame        (PowerShell: Copy-Item -Recurse)
-#       python pipeline.py <로그폴더> --game games/mygame
-#
-#   games/ 아래는 example 만 저장소에 올라간다. 자기 게임 폴더는 .gitignore 가
-#   막아 둔다 — 올리고 싶으면 .gitignore 에서 그 줄을 고친다.
+# 게임 정의 파일. `ptel init <폴더>` 가 만든 틀이다.
 #
 #   이 폴더의 세 파일 중 필수는 이것 하나다.
 #       game.yaml   지표 정의 + (협동 게임이면) merge 규칙
-#       views.sql   선택. 손으로 쓴 뷰
-#       cards.py    선택. 손으로 쓴 Metabase 카드
+#       views.sql   선택. 손으로 쓴 뷰 — 필요 없으면 지운다
+#       cards.py    선택. 손으로 쓴 Metabase 카드 — 필요 없으면 지운다
+#
+#   고친 뒤에는
+#       ptel run <로그폴더> --game <이 폴더>       # 처음 적재부터
+#       ptel run --game <이 폴더> --skip-load      # 지표 정의만 고쳤을 때
 #
 # 아래 이벤트·파라미터 이름은 전부 예시다. 자기 게임의 로그에 실제로 찍히는
 # 이름으로 바꾼다. 로그에 없는 이벤트를 적어도 오류는 아니고 값이 안 나올 뿐이다.
@@ -63,7 +59,7 @@ metrics:
 # 합계가 참가자 수만큼 부풀려진다(오류는 나지 않는다).
 #
 # 무엇을 적어야 할지 모르겠으면 2인 세션 로그를 적재한 뒤
-#     python merge_check.py --db playtest.sqlite
+#     ptel check --game <이 폴더>
 # 를 돌린다. 두 파일에 같은 내용으로 들어 있는 이벤트를 후보로 짚어준다.
 #
 # merge:

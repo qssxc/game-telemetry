@@ -3,7 +3,7 @@
 
 이 파일이 중립 층이다. 읽는 것은 지표 정의 YAML 과, 어느 게임에나 똑같이
 존재하는 지표 뷰(v_metrics_session · v_metrics_party · v_metrics_dimension ·
-v_metrics_global · v_metrics_global_dimension) 뿐이다. 게임 고유의 뷰(games/<게임>/views.sql)나 이벤트 이름은 쓰지 않는다.
+v_metrics_global · v_metrics_global_dimension) 뿐이다. 게임 고유의 뷰(<게임 폴더>/views.sql)나 이벤트 이름은 쓰지 않는다.
 
 그래서 새 게임에 붙일 때 이 파일은 손대지 않는다. 필요한 것은 그 게임의
 지표 정의 YAML 하나뿐이다. 손으로 쓴 게임 전용 카드는 선택이다.
@@ -12,8 +12,8 @@ v_metrics_global · v_metrics_global_dimension) 뿐이다. 게임 고유의 뷰(
 ----
     cardgen.py               (여기) 중립 — 지표 정의 → 카드
     views.sql                중립 — 기본 뷰와 지표 뷰
-    games/<게임>/cards.py    게임 전용 — 손으로 쓴 카드 (선택)
-    games/<게임>/views.sql   게임 전용 — 손으로 쓴 뷰 (선택)
+    <게임 폴더>/cards.py    게임 전용 — 손으로 쓴 카드 (선택)
+    <게임 폴더>/views.sql   게임 전용 — 손으로 쓴 뷰 (선택)
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ def from_metrics(yaml_path: str) -> dict[str, tuple[str, str]]:
       by: 있음            축으로 쪼갠 카드 — 지표 종류에 맞게 모은다
       그 외               세션 × 플레이어 카드
     """
-    import metrics
+    from . import metrics
     spec = metrics.load_definition(yaml_path)
 
     out: dict[str, tuple[str, str]] = {}

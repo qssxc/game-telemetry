@@ -15,12 +15,12 @@ Metabase 의 공식 내장 드라이버다. DuckDB 는 커뮤니티 드라이버
 "수집을 늘려도 도구는 그대로" 라는 전제가 깨진다.
 
 조회 편의는 뷰로 해결한다. 어느 게임에나 있는 기본 뷰는 views.sql 에,
-그 게임에서만 뜻이 있는 뷰는 games/<게임>/views.sql 에 둔다(--game-views).
+그 게임에서만 뜻이 있는 뷰는 <게임 폴더>/views.sql 에 둔다(--game-views).
 
 사용법
 ------
-    python loader.py <로그 폴더> [--db playtest.sqlite] [--reset]
-                     [--game-views games/<게임>/views.sql]
+    python -m playtest_telemetry.loader <로그 폴더> [--db playtest.sqlite] [--reset]
+                     [--game-views <게임 폴더>/views.sql]
 
 적재는 전체가 하나의 트랜잭션이다. Metabase 가 같은 파일을 열어둔 채로
 돌려도 중간 상태가 보이지 않고, 실패하면 직전 데이터가 온전히 남는다.
@@ -44,7 +44,7 @@ from typing import Any, Iterator
 
 # 스키마·인덱스·연결은 db.py 한 곳에만 둔다. 여기에 복사본이 있었을 때
 # metric_results 가 한쪽에만 생겨, --reset 뒤에 지표 뷰가 깨졌다.
-from db import INDEXES, OUR_TABLES, SCHEMA, connect, run_atomically
+from .db import INDEXES, OUR_TABLES, SCHEMA, connect, run_atomically
 
 # 이벤트 봉투(envelope)에 해당하는 키. 이 외의 키는 모두 파라미터로 본다.
 ENVELOPE_KEYS = {
@@ -306,8 +306,10 @@ def apply_views(con: sqlite3.Connection, views_path: pathlib.Path,
     return run_atomically(con, sql, "뷰 적용")
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="NDJSON 세션 로그를 SQLite 에 적재한다")
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="python -m playtest_telemetry.loader",
+        description="NDJSON 세션 로그를 SQLite 에 적재한다")
     ap.add_argument("log_dir", nargs="?",
                     help="*.ndjson 이 들어있는 폴더 (--views-only 면 생략 가능)")
     ap.add_argument("--db", default="playtest.sqlite", help="출력 DB 경로")
@@ -317,11 +319,11 @@ def main() -> int:
                     help="적용할 뷰 스크립트 (기본: 이 스크립트 옆의 views.sql)")
     ap.add_argument("--game-views", default=None, metavar="VIEWS.SQL",
                     help="기본 뷰 뒤에 이어서 적용할 게임 전용 뷰 "
-                         "(예: games/mygame/views.sql)")
+                         "(예: mygame/views.sql)")
     ap.add_argument("--no-views", action="store_true", help="뷰를 적용하지 않는다")
     ap.add_argument("--views-only", action="store_true",
                     help="적재 없이 뷰만 다시 적용한다")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     db_path = pathlib.Path(args.db)
     views_path = pathlib.Path(args.views) if args.views \

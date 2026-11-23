@@ -1,45 +1,83 @@
-# 분석 파이프라인
+# Playtest Telemetry
 
-게임이 남긴 NDJSON 을 받아 질의 가능한 형태로 만들고, 정의 파일에 적힌
-파생지표를 계산한다. 게임을 모른다 — 게임 고유 지식은 전부 정의 파일에 있다.
+플레이테스트에서 일어난 일을 숫자로 보기 위한 도구다. 두 부분으로 되어 있다.
+
+| 부분 | 위치 | 하는 일 |
+|---|---|---|
+| 수집기 (Unity, C#) | [`unity/`](unity/) | `Telemetry.Record(...)` 로 사건을 NDJSON 로그 파일에 남긴다 |
+| 분석 도구 (Python, `ptel`) | [`playtest_telemetry/`](playtest_telemetry/) | 로그를 SQLite 에 적재하고, 정의 파일대로 지표를 계산하고, Metabase 카드까지 만든다 |
 
 ```
 세션 로그(.ndjson)          참가자마다 파일 하나
-      ↓  loader.py          적재 + 뷰 → sessions / events / event_params
-      ↓  merge.py           협동 병합  → canonical, merge_overrides
-      ↓  metrics.py         지표 계산  → metric_results
-      ↓  metabase_api.py    카드 생성/갱신 → Metabase
+      ↓  loader             적재 + 뷰 → sessions / events / event_params
+      ↓  merge              협동 병합 → canonical, merge_overrides, 시간 정렬
+      ↓  viewgen            이벤트마다 뷰 → v_<이벤트>
+      ↓  metrics            지표 계산 → metric_results
+      ↓  metabase_api       카드 생성/갱신 → Metabase
 ```
+
+자세한 사용법은 사용 가이드에 있다. 이 README 는 설치와 빠른 시작, 그리고
+설계상 결정한 것들을 적는다.
+
+## 설치
+
+**분석 도구** — Python 3.9 이상. 외부 의존성은 PyYAML 하나이고 함께 설치된다.
+
+```bash
+pip install git+https://github.com/qssxc/game-telemetry
+ptel --version
+```
+
+새 버전으로 올릴 때는 `pip install --upgrade git+https://github.com/qssxc/game-telemetry`.
+`ptel` 이 PATH 에 없으면 `python -m playtest_telemetry` 로 같은 명령을 쓴다.
+
+**수집기** — Unity 2021.3 이상. Package Manager 에서 *Add package from git URL* 을
+고르고 아래 주소를 넣는다.
+
+```
+https://github.com/qssxc/game-telemetry.git?path=unity
+```
+
+동작 확인용 스크립트는 Package Manager 의 Samples 에서 *Smoke Test* 를 가져온다.
+예전처럼 `Assets/` 에 SDK 를 복사해 쓰고 있었다면 그 폴더를 지운 뒤 설치한다.
+같은 스크립트가 두 벌이면 컴파일 오류가 난다.
+
+## 빠른 시작
+
+```bash
+ptel init mygame                         # 게임 폴더의 틀 (game.yaml, views.sql, cards.py)
+ptel run <로그폴더> --game mygame         # 적재 → 병합 → 뷰 → 지표
+ptel run --game mygame --skip-load        # 지표 정의만 고쳤을 때
+ptel check --game mygame                  # 협동 세션이 병합 가능한 상태인지
+ptel push --game mygame                   # Metabase 카드만 반영
+```
+
+결과는 현재 폴더의 `playtest.sqlite` 하나다. 명령마다 `ptel <명령> --help` 로 옵션을 본다.
+
+## 저장소 구성
+
+| 경로 | 내용 |
+|---|---|
+| `playtest_telemetry/` | 분석 도구 패키지. 어느 게임도 모른다 |
+| `playtest_telemetry/views.sql` | 기본 뷰·지표 뷰 |
+| `playtest_telemetry/templates/` | `ptel init` 이 복사하는 게임 폴더의 틀 |
+| `unity/` | 수집기 Unity 패키지 (`package.json`, `Runtime/`, `Samples~/`) |
+| `pyproject.toml` | 분석 도구의 설치 정보. `ptel` 명령을 등록한다 |
+| `CHANGELOG.md` · `LICENSE` · `THIRD_PARTY_NOTICES.md` | 변경 내역 · MIT 라이선스 · 외부 구성요소 |
 
 ## 어디까지가 게임과 무관한가
 
-새 게임에 붙일 때 **손대지 않는 파일**과 **그 게임을 위해 쓰는 파일**이 갈린다.
+새 게임에 붙일 때 **손대지 않는 것**과 **그 게임을 위해 쓰는 것**이 갈린다.
 
-| 중립 — 저장소 맨 위, 그대로 쓴다 | 게임 전용 — `games/<게임>/`, 새로 쓴다 |
+| 중립 — 패키지, 그대로 쓴다 | 게임 전용 — 게임 폴더, 새로 쓴다 |
 |---|---|
-| `loader.py` `merge.py` `viewgen.py` `metrics.py` | **`game.yaml`** — 지표 정의 + (협동이면) `merge:` 규칙. **필수** |
-| `cardgen.py` `metabase_api.py` `pipeline.py` | `views.sql` — 손으로 쓴 뷰. 선택 |
-| `views.sql` (기본 뷰·지표 뷰) | `cards.py` — 손으로 쓴 Metabase 카드. 선택 |
+| `playtest_telemetry/` 의 모듈 전부 | **`game.yaml`** — 지표 정의 + (협동이면) `merge:` 규칙. **필수** |
+| `views.sql` (기본 뷰·지표 뷰) | `views.sql` — 손으로 쓴 뷰. 선택 |
+| | `cards.py` — 손으로 쓴 Metabase 카드. 선택 |
 
-맨 위의 파일에는 이벤트 이름도 파라미터 이름도 없다. 게임마다 다른 것은 전부
-게임 폴더 하나에 들어간다.
-
-```
-games/
-  example/          ← 틀. 복사해서 시작한다
-    game.yaml
-    views.sql
-    cards.py
-  mygame/           ← 자기 게임. .gitignore 가 막아 저장소에 올라가지 않는다
-```
-
-```bash
-cp -r games/example games/mygame        # PowerShell: Copy-Item -Recurse games/example games/mygame
-python pipeline.py <로그폴더> --game games/mygame
-```
-
-`games/` 아래는 `example` 만 올라간다. 자기 게임도 올리려면 `.gitignore` 에
-`!games/mygame/` 줄을 더한다.
+패키지에는 이벤트 이름도 파라미터 이름도 없다. 게임마다 다른 것은 전부
+게임 폴더 하나에 들어간다. 게임 폴더는 어디에 두어도 되고 `ptel init <폴더>` 로
+만든다.
 
 > 어떤 이벤트가 협동 세션에서 참가자마다 복제되는지는 게임마다 다르다.
 > 그 지식은 `merge.py` 코드가 아니라 **정의 파일의 `merge:` 섹션**에 적는다
@@ -92,7 +130,7 @@ v_monster_killed_all   2건   ← 원본. 병합이 제대로 됐는지 볼 때
 로그에서 사라졌거나, 중복이 없어져 `_all` 이 필요 없거나, 손으로 쓴 뷰가 그
 이벤트를 맡게 된 경우 — 는 생성할 때 지운다. 손으로 쓴 뷰는 건드리지 않는다.
 
-계산이 들어간 뷰는 만들지 못한다. 누적 잔액(예: `games/example` 의 `v_coin_ledger`),
+계산이 들어간 뷰는 만들지 못한다. 누적 잔액(예: `ptel init` 이 만드는 `views.sql` 의 `v_coin_ledger`),
 두 이벤트를 한 축으로 묶기 같은 것은 무엇을 보고 싶은지 사람이 정해야 한다. 그런 뷰는 게임 폴더의 `views.sql` 에 두면 생성기가 비켜 간다
 (`WHERE e.name = ...` 을 읽어 해당 이벤트를 건너뛴다).
 
@@ -100,10 +138,10 @@ v_monster_killed_all   2건   ← 원본. 병합이 제대로 됐는지 볼 때
 
 ```bash
 # 파일로 받기 (views_generated.sql)
-python viewgen.py --db playtest.sqlite --skip-existing games/mygame/views.sql
+python -m playtest_telemetry.viewgen --db playtest.sqlite --skip-existing mygame/views.sql
 
 # 파일 없이 DB 에 바로
-python viewgen.py --db playtest.sqlite --skip-existing games/mygame/views.sql --apply --no-file
+python -m playtest_telemetry.viewgen --db playtest.sqlite --skip-existing mygame/views.sql --apply --no-file
 ```
 
 `--skip-existing` 을 빼면 손으로 쓴 뷰가 다루는 이벤트까지 만든다. 이름이
@@ -143,39 +181,36 @@ python viewgen.py --db playtest.sqlite --skip-existing games/mygame/views.sql --
 ## 실행
 
 ```bash
-pip install pyyaml          # 이게 전부다. sqlite3 는 파이썬에 내장되어 있다.
-
 # 한 명령으로 전부
-python pipeline.py <로그폴더> --game games/mygame --reset --push
+ptel run <로그폴더> --game mygame --reset --push
 ```
 
 단계를 따로 돌리고 싶으면 아래처럼 한다. **순서가 중요하다.**
 
 ```bash
 # 1. 적재 (기본 뷰까지 만든다)
-python loader.py <로그폴더> --db playtest.sqlite --reset --game-views games/mygame/views.sql
+python -m playtest_telemetry.loader <로그폴더> --db playtest.sqlite --reset --game-views mygame/views.sql
 
 # 2. 협동 세션 병합 (1인 세션만 있어도 돌려두면 된다 — 아무것도 바뀌지 않는다)
-python merge.py games/mygame/game.yaml --db playtest.sqlite --show
+python -m playtest_telemetry.merge mygame/game.yaml --db playtest.sqlite --show
 
 # 3. 이벤트마다 뷰 생성 — 반드시 2번 뒤에
-python viewgen.py --db playtest.sqlite --skip-existing games/mygame/views.sql --apply --no-file
+python -m playtest_telemetry.viewgen --db playtest.sqlite --skip-existing mygame/views.sql --apply --no-file
 
 # 4. 지표 계산
-python metrics.py games/mygame/game.yaml --db playtest.sqlite --show
+python -m playtest_telemetry.metrics mygame/game.yaml --db playtest.sqlite --show
 
-# 5. Metabase 카드 생성/갱신 (지표마다 카드 한 장까지 원하면 --from-yaml)
-python metabase_api.py --db-file playtest.sqlite --push \
-    --from-yaml games/mygame/game.yaml --cards games/mygame/cards.py
+# 5. Metabase 카드 생성/갱신
+ptel push --game mygame
 ```
 
 **3번이 2번 뒤인 것이 중요하다.** 협동 세션에서 참가자마다 복제되는 이벤트를
 걸러낸 뷰를 만들려면 `merge.py` 가 먼저 판정을 끝내야 한다. 적재 직후에 돌리면
-`canonical` 이 전부 1 이라 필터가 붙지 않는다. `pipeline.py` 는 이 순서를
+`canonical` 이 전부 1 이라 필터가 붙지 않는다. `ptel run`(`pipeline.py`) 은 이 순서를
 한 곳에 박아둔 것이다.
 
 ```
-$ python pipeline.py testlogs --reset --push
+$ ptel run testlogs --game mygame --reset --push
 
 [1/5] 적재 — testlogs → playtest.sqlite
       0.4초 — 파일 14개, 이벤트 600건
@@ -206,23 +241,23 @@ $ python pipeline.py testlogs --reset --push
 `merge.py` 와 `metrics.py` 가 자기 커밋을 하지 않도록 고쳐야 하는데, 지금
 규모에서는 그만한 값어치가 없다고 보고 두었다.
 
-5번은 `METABASE_URL` 과 `METABASE_API_KEY` 환경변수를 읽는다. PowerShell 에는
+`ptel push`(5번)는 `METABASE_URL` 과 `METABASE_API_KEY` 환경변수를 읽는다. PowerShell 에는
 `export` 가 없으니 `$env:METABASE_URL = "http://localhost:3000"` 으로 설정한다.
-자세한 것은 `metabase_api.py` 머리말에 있다.
+자세한 것은 `playtest_telemetry/metabase_api.py` 머리말에 있다.
 
-2인 세션을 처음 받았다면 병합 전에 `merge_check.py` 로 상태를 먼저 본다.
-정의 파일 없이 돌리면 두 파일에 같은 내용으로 들어 있는 이벤트를 **중복
-후보**로 짚어준다. `merge:` 규칙을 처음 쓸 때 여기서 시작한다.
+2인 세션을 처음 받았다면 병합 전에 `ptel check` 로 상태를 먼저 본다.
+`game.yaml` 에 `merge:` 섹션이 없으면 두 파일에 같은 내용으로 들어 있는 이벤트를
+**중복 후보**로 짚어준다. 규칙을 적은 뒤 다시 돌리면 규칙이 다 덮는지 보여준다.
 
 ```bash
-python merge_check.py --db playtest.sqlite                 # 후보 찾기
-python merge_check.py games/mygame/game.yaml --db playtest.sqlite  # 규칙이 다 덮는지 확인
+ptel run <로그폴더> --game mygame --reset
+ptel check --game mygame
 ```
 
 뷰만 고쳤을 때는 다시 적재할 필요 없이
 
 ```bash
-python loader.py --views-only --db playtest.sqlite --game-views games/mygame/views.sql
+python -m playtest_telemetry.loader --views-only --db playtest.sqlite --game-views mygame/views.sql
 ```
 
 ### `sqlite3 ... < views.sql` 을 쓰지 않는 이유
@@ -238,7 +273,7 @@ PowerShell 은 `<` 리다이렉션을 지원하지 않는다. 예약어로 잡�
 Windows PowerShell 5.1 은 파이프로 넘길 때 기본 출력 인코딩이 ASCII 라
 `views.sql` 안의 한글 주석이 깨진다.
 
-그래서 `loader.py` 가 파일을 UTF-8 로 직접 읽어 적용한다. 리다이렉션도,
+그래서 적재기(`loader.py`)가 파일을 UTF-8 로 직접 읽어 적용한다. 리다이렉션도,
 인코딩도, `sqlite3.exe` 설치 여부도 문제가 되지 않는다.
 
 sqlite3 명령줄 도구로 직접 하고 싶다면 자체 내장 명령을 쓰면 된다.
@@ -270,7 +305,7 @@ docker run -d -p 3000:3000 \
 
 연결 후 **동기화**를 돌리면 뷰도 테이블처럼 잡힌다.
 
-카드는 손으로 만들지 않는다. `metabase_api.py --push` 가 `cardgen.py` 로
+카드는 손으로 만들지 않는다. `ptel push`(`metabase_api.py`)가 `cardgen.py` 로
 정의 파일에서 생성한 카드와 (`--cards` 로 주면) 게임 폴더 `cards.py` 의 손으로 쓴 카드를 만들고, 다시 돌리면 **지우지 않고 갱신한다** —
 카드 id 가 유지돼야 대시보드에 올려둔 것이 떨어지지 않는다. 사람이 Metabase
 에서 바꾼 차트 모양도 덮어쓰지 않는다. 보내기 전에 로컬 SQLite 로 쿼리를
@@ -316,7 +351,7 @@ docker run -d -p 3000:3000 \
 
 게임 폴더의 `game.yaml` 이 "무엇을 지표로 볼지" 를 정한다. 게임에는 들어가지 않는다.
 고치고 `metrics.py` 를 다시 돌리면 새 지표가 나온다. **게임을 다시 빌드할
-필요가 없다** — 이게 이 구조의 요점이다. 틀은 `games/example/game.yaml` 에 있다.
+필요가 없다** — 이게 이 구조의 요점이다. 틀은 `ptel init` 이 만든다(`playtest_telemetry/templates/game.yaml`).
 
 ```yaml
 metrics:
