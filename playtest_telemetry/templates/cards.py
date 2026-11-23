@@ -5,10 +5,9 @@
 여기에는 그걸로 안 되는 카드만 손으로 쓴다 — 이 게임의 뷰(views.sql)나
 이벤트별 자동 뷰(v_<이벤트이름>)를 직접 조회하는 카드.
 
-pipeline.py --push 가 이 파일을 읽는다. 따로 올릴 때는
+ptel run --push 와 ptel push 가 이 파일을 읽는다. 카드만 따로 올릴 때는
 
-    python metabase_api.py --db-file playtest.sqlite --push \\
-        --from-yaml games/mygame/game.yaml --cards games/mygame/cards.py
+    ptel push --game <이 폴더>
 
 읽는 이름은 셋이다.
 

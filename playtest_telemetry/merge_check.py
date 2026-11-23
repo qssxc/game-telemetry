@@ -15,8 +15,8 @@
 
 사용법
 ------
-    python loader.py <로그폴더> --db playtest.sqlite --reset
-    python merge_check.py [game.yaml] --db playtest.sqlite
+    python -m playtest_telemetry.loader <로그폴더> --db playtest.sqlite --reset
+    python -m playtest_telemetry.merge_check [game.yaml] --db playtest.sqlite
 """
 
 from __future__ import annotations
@@ -30,9 +30,9 @@ import sys
 from collections import defaultdict
 from typing import Any
 
-import merge
-from db import connect
-from merge import Rules, RulesError, dedup_key, load_rules_file
+from . import merge
+from .db import connect
+from .merge import Rules, RulesError, dedup_key, load_rules_file
 
 def parse_clock(value: Any) -> dt.datetime | None:
     if not value:
@@ -271,12 +271,14 @@ def check_session(con, session_id: str, players: list[str], rules: Rules) -> Non
     report_clock(ev_by_player, broadcast, rules)
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="협동 세션 병합 가능 여부를 검사한다")
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="python -m playtest_telemetry.merge_check",
+        description="협동 세션 병합 가능 여부를 검사한다")
     ap.add_argument("definition", nargs="?",
                     help="정의 파일 YAML. 생략하면 규칙 없이 중복 후보만 찾는다")
     ap.add_argument("--db", default="playtest.sqlite")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     rules = Rules()
     if args.definition:

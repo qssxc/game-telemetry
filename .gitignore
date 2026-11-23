@@ -1,6 +1,12 @@
 __pycache__/
 *.pyc
 
+# 설치·빌드 생성물
+*.egg-info/
+build/
+dist/
+.venv/
+
 # 데이터 / DB
 *.sqlite
 *.sqlite-shm
@@ -8,16 +14,11 @@ __pycache__/
 *.db
 *.ndjson
 
-# viewgen.py 의 기본 출력 — 생성물이다
+# viewgen 의 기본 출력 — 생성물이다
 views_generated.sql
 
 # Metabase 실행 파일·내부 DB
 metabase/
-
-# 게임 폴더 — 게임마다 따로 갖는다. 틀(games/example)만 올린다.
-# 자기 게임도 올리려면 아래에 `!games/<게임>/` 줄을 더한다.
-games/*
-!games/example/
 
 # 비밀 정보
 .env

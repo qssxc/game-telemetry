@@ -34,7 +34,7 @@ PowerShell (Windows 기본)
 
     $env:METABASE_URL     = "http://localhost:3000"
     $env:METABASE_API_KEY = "mb_xxxxxxxx"
-    python metabase_api.py --db-file playtest.sqlite
+    python -m playtest_telemetry.metabase_api --db-file playtest.sqlite
 
     # 아이디/비밀번호로 할 때
     $env:METABASE_USER     = "me@example.com"
@@ -44,7 +44,7 @@ bash / zsh (macOS · Linux)
 
     export METABASE_URL=http://localhost:3000
     export METABASE_API_KEY=mb_xxxxxxxx
-    python metabase_api.py --db-file playtest.sqlite
+    python -m playtest_telemetry.metabase_api --db-file playtest.sqlite
 
 PowerShell 에는 export 가 없다. $env:NAME = "값" 으로 설정하고, bash 처럼
 `VAR=값 명령` 한 줄에 붙이는 문법도 없으니 먼저 설정한 뒤 실행한다.
@@ -68,7 +68,7 @@ import urllib.request
 import uuid
 from typing import Any
 
-from db import connect
+from .db import connect
 
 
 class MetabaseError(Exception):
@@ -446,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     """argv 를 받는 이유 — pipeline.py 가 한 프로세스 안에서 부른다.
     None 이면 평소처럼 명령줄을 읽는다."""
     ap = argparse.ArgumentParser(
+        prog="python -m playtest_telemetry.metabase_api",
         description="Metabase 연결을 확인하고 데이터베이스 목록을 보여준다"
     )
     ap.add_argument("--url", default=None,
@@ -456,7 +457,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="카드를 Metabase 에 생성/갱신한다 "
                          "(--from-yaml 로 생성한 카드 + --cards 의 손으로 쓴 카드)")
     ap.add_argument("--cards", default=None, metavar="CARDS.PY",
-                    help="손으로 쓴 게임 전용 카드 파일 (예: games/mygame/cards.py)")
+                    help="손으로 쓴 게임 전용 카드 파일 (예: mygame/cards.py)")
     ap.add_argument("--collection", default="플레이테스트 지표",
                     help="카드를 담을 컬렉션 이름")
     ap.add_argument("--dry-run", action="store_true",
@@ -518,13 +519,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # ------------------------------------------------------------- 카드 밀어넣기
-    if not db:
+    if not args.db_file:
         print("\n[실패] --push 에는 --db-file 로 대상 DB 를 지정해야 한다.",
               file=sys.stderr)
         return 1
+    if not db:
+        # 위에서 "등록돼 있지 않다" 를 이미 알렸다. 파일 이름으로 찾으므로
+        # --db 에 준 이름과 Metabase 에 등록한 파일 이름이 같아야 한다.
+        print(f"\n[실패] {os.path.basename(args.db_file)} 가 Metabase 에 등록돼 있지 않아 "
+              f"카드를 올리지 않는다.", file=sys.stderr)
+        return 1
 
     try:
-        import cardgen
+        from . import cardgen
     except ImportError as e:
         print(f"\n[실패] cardgen.py 를 불러오지 못했다: {e}", file=sys.stderr)
         return 1
@@ -556,7 +563,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\n--cards 없음 — 지표 정의에서 생성한 카드만 올린다")
 
     if args.from_yaml:
-        import metrics
+        from . import metrics
         try:
             gen = cardgen.from_metrics(args.from_yaml)
         except metrics.DefinitionError as e:

@@ -40,9 +40,9 @@ canonical = 1 만 보면 되고, 클라이언트별 분석은 전부 보면 된�
 
 사용법
 ------
-    python loader.py <로그폴더> --db playtest.sqlite --reset
-    python merge.py game.yaml --db playtest.sqlite
-    python metrics.py game.yaml --db playtest.sqlite
+    python -m playtest_telemetry.loader <로그폴더> --db playtest.sqlite --reset
+    python -m playtest_telemetry.merge game.yaml --db playtest.sqlite
+    python -m playtest_telemetry.metrics game.yaml --db playtest.sqlite
 """
 
 from __future__ import annotations
@@ -57,8 +57,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
-from db import SCHEMA, connect
-from metrics import describe_unknown
+from .db import SCHEMA, connect
+from .metrics import describe_unknown
 
 # ---------------------------------------------------------------- 판정 규칙
 #
@@ -669,15 +669,17 @@ def merge(con: sqlite3.Connection, rules: Rules | None = None) -> int:
     return 0
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="협동 세션의 중복을 판정한다")
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="python -m playtest_telemetry.merge",
+        description="협동 세션의 중복을 판정한다")
     ap.add_argument("definition", nargs="?",
                     help="정의 파일 YAML. merge: 섹션에서 판정 규칙을 읽는다. "
                          "생략하면 규칙 없이 돈다(1인 게임)")
     ap.add_argument("--db", default="playtest.sqlite")
     ap.add_argument("--show", action="store_true",
                     help="판정 전후의 합계를 이벤트별로 보여준다")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     rules = Rules()
     if args.definition:
@@ -692,7 +694,7 @@ def main() -> int:
 
     if not pathlib.Path(args.db).exists():
         # 그대로 열면 빈 DB 가 새로 생기고 "완료" 가 찍힌다.
-        print(f"[오류] DB 가 없다: {args.db} — loader.py 로 먼저 적재하라",
+        print(f"[오류] DB 가 없다: {args.db} — ptel run 으로 먼저 적재하라",
               file=sys.stderr)
         return 1
     con = connect(args.db)
